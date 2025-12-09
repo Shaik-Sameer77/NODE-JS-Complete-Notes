@@ -1,7 +1,7 @@
 # Real-Time Systems - Comprehensive Guide
 
 ## 📚 Table of Contents
-1. [Socket.io](#socketio)
+1. [Socket.io](#1-socket.io)
 2. [WebSockets Bare Implementation](#websockets-bare-implementation)
 3. [Redis Pub/Sub](#redis-pubsub)
 4. [Broadcasting Events](#broadcasting-events)
@@ -12,7 +12,7 @@
 
 ---
 
-## 1. Socket.io {#socketio}
+## 1. Socket.io
 
 ### Overview
 Socket.io is a JavaScript library that enables real-time, bidirectional, and event-based communication between web clients and servers. It provides an abstraction over WebSockets with additional features like automatic reconnection, rooms, and fallback mechanisms.
