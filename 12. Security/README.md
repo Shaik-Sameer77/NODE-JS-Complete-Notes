@@ -1990,3 +1990,6 @@ class SecurityIncidentResponse {
 5. **Practice**: Use platforms like PortSwigger Labs to practice real exploits
 
 ---
+
+*Last updated: December 2025*  
+*Remember: Security is a process, not a product. Regular audits, updates, and education are key to maintaining a secure application.*
