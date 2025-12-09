@@ -1,4554 +1,3790 @@
-# Hands-on Backend Implementations: Comprehensive Guide
+# Backend Implementation Guide
 
-## 📚 Table of Contents
-1. [Authentication System](#1-authentication-system)
-2. [Role-based Permissions](#2-role-based-permissions)
-3. [CRUD with PostgreSQL & MongoDB](#3-crud-with-postgresql--mongodb)
-4. [File Uploads](#4-file-uploads)
-5. [Real-time Chat](#5-real-time-chat)
-6. [Online/Offline Status Tracker](#6-onlineoffline-status-tracker)
-7. [Payment Gateway](#7-payment-gateway)
-8. [Email Service](#8-email-service)
-9. [Refresh Token Rotation](#9-refresh-token-rotation)
-10. [Background Jobs](#10-background-jobs)
-11. [Cloud Storage System](#11-cloud-storage-system)
-12. [Multi-tenant Architecture](#12-multi-tenant-architecture)
+## Table of Contents
+1. [Authentication System](#authentication-system)
+2. [Role-based Permissions](#role-based-permissions)
+3. [CRUD with PostgreSQL & MongoDB](#crud-with-postgresql--mongodb)
+4. [File Uploads](#file-uploads)
+5. [Real-time Chat](#real-time-chat)
+6. [Online/Offline Status Tracker](#onlineoffline-status-tracker)
+7. [Payment Gateway](#payment-gateway)
+8. [Email Service](#email-service)
+9. [Refresh Token Rotation](#refresh-token-rotation)
+10. [Background Jobs](#background-jobs)
+11. [Cloud Storage System](#cloud-storage-system)
+12. [Multi-tenant Architecture](#multi-tenant-architecture)
 
 ---
 
-## 1. Authentication System
+## 1. Authentication System <a name="authentication-system"></a>
 
-### 📖 In-Depth Explanation
+### Implementation
+```javascript
+// JWT-based authentication with bcrypt hashing
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
 
-A comprehensive authentication system handles user registration, login, password management, and session handling securely.
+class AuthService {
+  async register(userData) {
+    const hashedPassword = await bcrypt.hash(userData.password, 12);
+    const user = await User.create({
+      ...userData,
+      password: hashedPassword
+    });
+    
+    const tokens = this.generateTokens(user);
+    await this.storeRefreshToken(user.id, tokens.refreshToken);
+    
+    return { user, tokens };
+  }
 
-#### **Complete Authentication System with TypeScript**
+  async login(email, password) {
+    const user = await User.findOne({ email });
+    if (!user) throw new Error('User not found');
+    
+    const isValid = await bcrypt.compare(password, user.password);
+    if (!isValid) throw new Error('Invalid credentials');
+    
+    const tokens = this.generateTokens(user);
+    await this.storeRefreshToken(user.id, tokens.refreshToken);
+    
+    return { user, tokens };
+  }
 
-```typescript
-// src/auth/auth.service.ts
-import {
-  Injectable,
-  ConflictException,
-  UnauthorizedException,
-  BadRequestException,
-  ForbiddenException,
-} from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
-import * as bcrypt from 'bcrypt';
-import * as crypto from 'crypto';
-import { v4 as uuidv4 } from 'uuid';
-import { RedisService } from '../redis/redis.service';
-import { EmailService } from '../email/email.service';
-import { UserService } from '../user/user.service';
-import { SessionService } from '../session/session.service';
-import {
-  LoginDto,
-  RegisterDto,
-  ForgotPasswordDto,
-  ResetPasswordDto,
-  ChangePasswordDto,
-  VerifyEmailDto,
-} from './dto';
+  generateTokens(user) {
+    const accessToken = jwt.sign(
+      { userId: user.id, email: user.email },
+      process.env.JWT_ACCESS_SECRET,
+      { expiresIn: '15m' }
+    );
+    
+    const refreshToken = jwt.sign(
+      { userId: user.id },
+      process.env.JWT_REFRESH_SECRET,
+      { expiresIn: '7d' }
+    );
+    
+    return { accessToken, refreshToken };
+  }
 
-interface TokenPayload {
-  sub: string;
-  email: string;
-  sessionId: string;
-  type: 'access' | 'refresh';
+  async verifyToken(token, isRefresh = false) {
+    const secret = isRefresh 
+      ? process.env.JWT_REFRESH_SECRET 
+      : process.env.JWT_ACCESS_SECRET;
+    
+    return jwt.verify(token, secret);
+  }
+}
+```
+
+### Interview Questions
+**Technical:**
+1. Explain the difference between session-based and token-based authentication.
+2. How do you securely store passwords in a database?
+3. What are JWT tokens and what are their advantages/disadvantages?
+4. How would you implement rate limiting on authentication endpoints?
+5. Explain OAuth 2.0 flow and when to use it.
+
+**Scenario-based:**
+1. Your authentication system is experiencing a high rate of failed login attempts. How would you investigate and mitigate this?
+2. How would you handle authentication in a microservices architecture?
+3. A user reports their account was hacked. What steps would you take?
+4. How would you implement single sign-on (SSO) across multiple applications?
+5. Your JWT tokens are being stolen via XSS. What mitigation strategies would you implement?
+
+---
+
+## 2. Role-based Permissions <a name="role-based-permissions"></a>
+
+### Implementation
+```javascript
+// RBAC with permission hierarchy
+class RBACService {
+  constructor() {
+    this.roles = {
+      super_admin: ['*'],
+      admin: ['users:read', 'users:write', 'content:*'],
+      editor: ['content:read', 'content:write'],
+      user: ['profile:read', 'profile:write']
+    };
+    
+    this.permissions = new Map();
+    Object.entries(this.roles).forEach(([role, perms]) => {
+      this.permissions.set(role, new Set(perms));
+    });
+  }
+
+  hasPermission(userRole, requiredPermission) {
+    if (userRole === 'super_admin') return true;
+    
+    const userPermissions = this.permissions.get(userRole);
+    if (!userPermissions) return false;
+    
+    // Check exact permission
+    if (userPermissions.has(requiredPermission)) return true;
+    
+    // Check wildcard permissions
+    const [resource, action] = requiredPermission.split(':');
+    return userPermissions.has(`${resource}:*`) || 
+           userPermissions.has('*');
+  }
+
+  // Dynamic role assignment with scopes
+  async assignRole(userId, role, resourceScope = null) {
+    await UserRole.create({
+      userId,
+      role,
+      resourceScope, // e.g., 'team:123' or 'project:456'
+      createdAt: new Date()
+    });
+  }
+
+  // Permission check with resource scope
+  async can(userId, action, resource, resourceId = null) {
+    const userRoles = await UserRole.findAll({ where: { userId } });
+    
+    return userRoles.some(userRole => {
+      const permission = resourceId 
+        ? `${resource}:${action}:${resourceId}`
+        : `${resource}:${action}`;
+      
+      return this.hasPermission(userRole.role, permission) &&
+             (!userRole.resourceScope || 
+              this.checkScope(userRole.resourceScope, resource, resourceId));
+    });
+  }
 }
 
-@Injectable()
-export class AuthService {
-  constructor(
-    private readonly userService: UserService,
-    private readonly jwtService: JwtService,
-    private readonly redisService: RedisService,
-    private readonly emailService: EmailService,
-    private readonly sessionService: SessionService,
-  ) {}
-
-  private readonly SALT_ROUNDS = 12;
-  private readonly ACCESS_TOKEN_EXPIRY = '15m';
-  private readonly REFRESH_TOKEN_EXPIRY = '7d';
-  private readonly PASSWORD_RESET_EXPIRY = 3600; // 1 hour
-  private readonly EMAIL_VERIFICATION_EXPIRY = 86400; // 24 hours
-
-  async register(registerDto: RegisterDto) {
-    const { email, password, name } = registerDto;
-
-    // Check if user exists
-    const existingUser = await this.userService.findByEmail(email);
-    if (existingUser) {
-      throw new ConflictException('User already exists');
-    }
-
-    // Validate password strength
-    this.validatePasswordStrength(password);
-
-    // Hash password
-    const hashedPassword = await this.hashPassword(password);
-
-    // Generate email verification token
-    const verificationToken = this.generateToken();
-    const verificationTokenHash = await this.hashToken(verificationToken);
-
-    // Create user
-    const user = await this.userService.create({
-      email,
-      password: hashedPassword,
-      name,
-      emailVerificationToken: verificationTokenHash,
-      emailVerified: false,
-      status: 'pending',
-    });
-
-    // Send verification email
-    await this.emailService.sendVerificationEmail(
-      email,
-      name,
-      verificationToken,
+// Middleware
+const authorize = (action, resource) => {
+  return async (req, res, next) => {
+    const canAccess = await rbacService.can(
+      req.user.id, 
+      action, 
+      resource, 
+      req.params.id
     );
-
-    // Generate initial session
-    const session = await this.sessionService.create({
-      userId: user.id,
-      userAgent: registerDto.userAgent,
-      ipAddress: registerDto.ipAddress,
-    });
-
-    // Generate tokens
-    const tokens = await this.generateTokens(user, session.id);
-
-    // Remove sensitive data
-    const { password: _, emailVerificationToken: __, ...userWithoutSensitive } = user;
-
-    return {
-      user: userWithoutSensitive,
-      tokens,
-      session,
-    };
-  }
-
-  async login(loginDto: LoginDto) {
-    const { email, password, userAgent, ipAddress } = loginDto;
-
-    // Find user
-    const user = await this.userService.findByEmail(email);
-    if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
+    
+    if (!canAccess) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
+    next();
+  };
+};
+```
 
-    // Check if account is locked
-    if (user.failedLoginAttempts >= 5) {
-      const lockTime = new Date(user.lockedUntil);
-      if (lockTime > new Date()) {
-        throw new ForbiddenException('Account is temporarily locked');
-      }
-    }
+### Interview Questions
+**Technical:**
+1. What's the difference between RBAC and ABAC?
+2. How would you implement hierarchical roles?
+3. How do you handle permission caching?
+4. What are the security considerations when implementing RBAC?
+5. How would you audit permission changes?
 
-    // Verify password
-    const isPasswordValid = await this.verifyPassword(
-      password,
-      user.password,
-    );
+**Scenario-based:**
+1. A user needs temporary elevated permissions for a specific task. How would you implement this?
+2. Your permission system is slowing down API responses. How would you optimize it?
+3. How would you migrate from a simple admin/user system to a full RBAC system?
+4. Describe how you would implement department-based permissions in an organization.
+5. How would you handle permission inheritance in nested resources (e.g., folder-file structure)?
 
-    if (!isPasswordValid) {
-      // Increment failed login attempts
-      await this.userService.incrementFailedLoginAttempts(user.id);
+---
 
-      if (user.failedLoginAttempts + 1 >= 5) {
-        await this.userService.lockAccount(user.id, 30); // Lock for 30 minutes
-        throw new ForbiddenException('Account has been locked due to too many failed attempts');
-      }
+## 3. CRUD with PostgreSQL & MongoDB <a name="crud-with-postgresql--mongodb"></a>
 
-      throw new UnauthorizedException('Invalid credentials');
-    }
+### PostgreSQL Implementation
+```javascript
+// Using Sequelize ORM
+const { Sequelize, DataTypes, Op } = require('sequelize');
 
-    // Reset failed login attempts on successful login
-    await this.userService.resetFailedLoginAttempts(user.id);
-
-    // Check if email is verified
-    if (!user.emailVerified) {
-      throw new ForbiddenException('Please verify your email address');
-    }
-
-    // Create new session
-    const session = await this.sessionService.create({
-      userId: user.id,
-      userAgent,
-      ipAddress,
-    });
-
-    // Generate tokens
-    const tokens = await this.generateTokens(user, session.id);
-
-    // Update last login
-    await this.userService.updateLastLogin(user.id);
-
-    // Remove sensitive data
-    const { password: _, ...userWithoutPassword } = user;
-
-    return {
-      user: userWithoutPassword,
-      tokens,
-      session,
-    };
+const sequelize = new Sequelize(process.env.DATABASE_URL, {
+  dialect: 'postgres',
+  logging: false,
+  pool: {
+    max: 10,
+    min: 0,
+    acquire: 30000,
+    idle: 10000
   }
+});
 
-  async logout(sessionId: string) {
-    // Blacklist tokens and remove session
-    await Promise.all([
-      this.sessionService.revoke(sessionId),
-      this.redisService.setex(`blacklist:${sessionId}`, 3600, 'true'), // Blacklist for 1 hour
-    ]);
-  }
-
-  async logoutAll(userId: string) {
-    await this.sessionService.revokeAll(userId);
-  }
-
-  async refreshTokens(refreshToken: string) {
-    try {
-      // Verify refresh token
-      const payload = await this.jwtService.verifyAsync<TokenPayload>(
-        refreshToken,
-        {
-          secret: process.env.JWT_REFRESH_SECRET,
+const User = sequelize.define('User', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  email: {
+    type: DataTypes.STRING,
+    unique: true,
+    allowNull: false,
+    validate: {
+      isEmail: true
+    }
+  },
+  // Complex query examples
+  async findActiveUsersWithOrders(startDate, endDate) {
+    return await User.findAll({
+      where: {
+        status: 'active',
+        createdAt: {
+          [Op.between]: [startDate, endDate]
+        }
+      },
+      include: [{
+        model: Order,
+        where: {
+          status: 'completed',
+          total: {
+            [Op.gt]: 100
+          }
         },
-      );
+        required: true
+      }],
+      order: [['createdAt', 'DESC']],
+      limit: 100,
+      offset: 0
+    });
+  },
 
-      if (payload.type !== 'refresh') {
-        throw new UnauthorizedException('Invalid token type');
+  // Transaction example
+  async transferBalance(senderId, receiverId, amount) {
+    const transaction = await sequelize.transaction();
+    
+    try {
+      const sender = await User.findByPk(senderId, { transaction });
+      const receiver = await User.findByPk(receiverId, { transaction });
+      
+      if (sender.balance < amount) {
+        throw new Error('Insufficient balance');
       }
-
-      // Check if token is blacklisted
-      const isBlacklisted = await this.redisService.get(
-        `blacklist:${payload.sessionId}`,
-      );
-      if (isBlacklisted) {
-        throw new UnauthorizedException('Token has been revoked');
-      }
-
-      // Get user and session
-      const [user, session] = await Promise.all([
-        this.userService.findById(payload.sub),
-        this.sessionService.findById(payload.sessionId),
-      ]);
-
-      if (!user || !session || session.revoked) {
-        throw new UnauthorizedException('Invalid session');
-      }
-
-      // Generate new tokens
-      const tokens = await this.generateTokens(user, session.id);
-
-      // Update session last activity
-      await this.sessionService.updateLastActivity(session.id);
-
-      return tokens;
+      
+      sender.balance -= amount;
+      receiver.balance += amount;
+      
+      await sender.save({ transaction });
+      await receiver.save({ transaction });
+      
+      await transaction.commit();
+      return { success: true };
     } catch (error) {
-      throw new UnauthorizedException('Invalid refresh token');
+      await transaction.rollback();
+      throw error;
+    }
+  }
+});
+```
+
+### MongoDB Implementation
+```javascript
+// Using Mongoose ODM
+const mongoose = require('mongoose');
+
+const userSchema = new mongoose.Schema({
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    index: true
+  },
+  profile: {
+    type: Map,
+    of: mongoose.Schema.Types.Mixed
+  },
+  tags: [String],
+  createdAt: {
+    type: Date,
+    default: Date.now,
+    index: true
+  }
+}, {
+  timestamps: true,
+  toJSON: { virtuals: true },
+  toObject: { virtuals: true }
+});
+
+// Complex aggregation example
+userSchema.statics.getUserAnalytics = async function(period) {
+  return await this.aggregate([
+    {
+      $match: {
+        createdAt: {
+          $gte: new Date(Date.now() - period * 24 * 60 * 60 * 1000)
+        }
+      }
+    },
+    {
+      $group: {
+        _id: {
+          $dateToString: { format: "%Y-%m-%d", date: "$createdAt" }
+        },
+        count: { $sum: 1 },
+        uniqueEmails: { $addToSet: "$email" }
+      }
+    },
+    {
+      $project: {
+        date: "$_id",
+        count: 1,
+        uniqueCount: { $size: "$uniqueEmails" }
+      }
+    },
+    { $sort: { date: 1 } }
+  ]);
+};
+
+// Text search with indexing
+userSchema.index({ 
+  email: 'text', 
+  'profile.name': 'text',
+  tags: 'text' 
+});
+
+const User = mongoose.model('User', userSchema);
+
+// Usage
+const results = await User.find({
+  $text: { $search: "john doe" },
+  tags: { $in: ["premium", "active"] }
+})
+.sort({ score: { $meta: "textScore" } })
+.limit(10);
+```
+
+### Interview Questions
+**Technical:**
+1. When would you choose PostgreSQL over MongoDB and vice versa?
+2. Explain ACID properties and how PostgreSQL implements them.
+3. How do you handle database migrations in production?
+4. What are database indexes and when should you use them?
+5. Explain the N+1 query problem and how to solve it.
+
+**Scenario-based:**
+1. Your PostgreSQL database is experiencing deadlocks. How would you debug and resolve this?
+2. How would you design a schema for a social media platform with posts, comments, and likes?
+3. Your MongoDB queries are slow despite proper indexing. What would you investigate?
+4. How would you implement full-text search across multiple fields in both databases?
+5. Describe how you would handle database sharding for a multi-tenant application.
+
+---
+
+## 4. File Uploads <a name="file-uploads"></a>
+
+### Implementation
+```javascript
+// Comprehensive file upload service
+const multer = require('multer');
+const path = require('path');
+const crypto = require('crypto');
+const sharp = require('sharp');
+const { S3 } = require('@aws-sdk/client-s3');
+
+class FileUploadService {
+  constructor() {
+    this.s3 = new S3({
+      region: process.env.AWS_REGION,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY,
+        secretAccessKey: process.env.AWS_SECRET_KEY
+      }
+    });
+    
+    this.storage = multer.memoryStorage();
+    this.upload = multer({
+      storage: this.storage,
+      limits: {
+        fileSize: 50 * 1024 * 1024, // 50MB
+        files: 10
+      },
+      fileFilter: this.fileFilter.bind(this)
+    });
+  }
+
+  fileFilter(req, file, cb) {
+    const allowedTypes = {
+      'image/jpeg': true,
+      'image/png': true,
+      'image/webp': true,
+      'application/pdf': true
+    };
+    
+    const maxSize = {
+      'image/jpeg': 10 * 1024 * 1024,
+      'image/png': 5 * 1024 * 1024,
+      'application/pdf': 20 * 1024 * 1024
+    };
+    
+    if (!allowedTypes[file.mimetype]) {
+      return cb(new Error('Invalid file type'));
+    }
+    
+    if (file.size > (maxSize[file.mimetype] || 5 * 1024 * 1024)) {
+      return cb(new Error('File too large'));
+    }
+    
+    cb(null, true);
+  }
+
+  async processImage(buffer, options = {}) {
+    const processor = sharp(buffer);
+    
+    if (options.resize) {
+      processor.resize(options.resize.width, options.resize.height, {
+        fit: options.resize.fit || 'cover'
+      });
+    }
+    
+    if (options.format) {
+      processor.toFormat(options.format, {
+        quality: options.quality || 80
+      });
+    }
+    
+    if (options.watermark) {
+      processor.composite([{
+        input: options.watermark,
+        gravity: 'southeast'
+      }]);
+    }
+    
+    return processor.toBuffer();
+  }
+
+  async uploadToS3(fileBuffer, fileName, options = {}) {
+    const fileKey = `${options.folder || 'uploads'}/${Date.now()}-${crypto.randomBytes(8).toString('hex')}-${fileName}`;
+    
+    const uploadParams = {
+      Bucket: process.env.S3_BUCKET,
+      Key: fileKey,
+      Body: fileBuffer,
+      ContentType: options.contentType,
+      ACL: options.isPublic ? 'public-read' : 'private',
+      Metadata: options.metadata || {}
+    };
+    
+    if (options.contentType?.startsWith('image/')) {
+      uploadParams.ContentDisposition = 'inline';
+    }
+    
+    const result = await this.s3.putObject(uploadParams);
+    
+    return {
+      key: fileKey,
+      url: `https://${process.env.S3_BUCKET}.s3.amazonaws.com/${fileKey}`,
+      etag: result.ETag,
+      size: fileBuffer.length
+    };
+  }
+
+  async handleChunkedUpload(fileId, chunkIndex, totalChunks, chunkData) {
+    const redisKey = `upload:${fileId}`;
+    
+    // Store chunk in Redis
+    await redis.hset(redisKey, chunkIndex, chunkData.toString('base64'));
+    
+    const uploadedChunks = await redis.hlen(redisKey);
+    
+    if (uploadedChunks === totalChunks) {
+      // Reassemble file
+      const chunks = [];
+      for (let i = 0; i < totalChunks; i++) {
+        const chunkBase64 = await redis.hget(redisKey, i);
+        chunks.push(Buffer.from(chunkBase64, 'base64'));
+      }
+      
+      const fileBuffer = Buffer.concat(chunks);
+      await redis.del(redisKey);
+      
+      return this.uploadToS3(fileBuffer, fileId);
+    }
+    
+    return { status: 'chunk_received', chunkIndex };
+  }
+}
+
+// Express middleware
+const fileService = new FileUploadService();
+router.post('/upload', 
+  fileService.upload.array('files', 10),
+  async (req, res) => {
+    try {
+      const results = await Promise.all(
+        req.files.map(async (file) => {
+          let processedBuffer = file.buffer;
+          
+          if (file.mimetype.startsWith('image/')) {
+            processedBuffer = await fileService.processImage(file.buffer, {
+              resize: { width: 1200, height: 800 },
+              format: 'webp',
+              quality: 75
+            });
+          }
+          
+          return fileService.uploadToS3(
+            processedBuffer,
+            file.originalname,
+            {
+              contentType: file.mimetype,
+              folder: 'user-uploads',
+              isPublic: true
+            }
+          );
+        })
+      );
+      
+      res.json({ success: true, files: results });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+```
+
+### Interview Questions
+**Technical:**
+1. How do you prevent malicious file uploads?
+2. Explain different file storage strategies (local, S3, CDN).
+3. How would you implement resumable file uploads?
+4. What are the considerations for handling large file uploads?
+5. How do you optimize image uploads for web delivery?
+
+**Scenario-based:**
+1. Users are uploading copyrighted material. How would you detect and prevent this?
+2. Your file upload endpoint is being DDoS attacked with large files. What would you do?
+3. How would you implement a file versioning system?
+4. Describe how you would migrate from local file storage to cloud storage without downtime.
+5. Users need to upload 10GB video files. How would you design this system?
+
+---
+
+## 5. Real-time Chat <a name="real-time-chat"></a>
+
+### Implementation
+```javascript
+// WebSocket server with Socket.IO and Redis for scaling
+const { Server } = require('socket.io');
+const Redis = require('ioredis');
+const { createAdapter } = require('@socket.io/redis-adapter');
+
+class ChatService {
+  constructor(server) {
+    this.io = new Server(server, {
+      cors: {
+        origin: process.env.CLIENT_URL,
+        credentials: true
+      },
+      transports: ['websocket', 'polling'],
+      pingTimeout: 60000,
+      pingInterval: 25000
+    });
+    
+    this.setupRedisAdapter();
+    this.setupMiddleware();
+    this.setupEventHandlers();
+  }
+
+  setupRedisAdapter() {
+    const pubClient = new Redis(process.env.REDIS_URL);
+    const subClient = pubClient.duplicate();
+    
+    this.io.adapter(createAdapter(pubClient, subClient));
+  }
+
+  setupMiddleware() {
+    // Authentication middleware
+    this.io.use(async (socket, next) => {
+      try {
+        const token = socket.handshake.auth.token;
+        const user = await this.verifyToken(token);
+        
+        if (!user) {
+          return next(new Error('Authentication error'));
+        }
+        
+        socket.user = user;
+        socket.join(`user:${user.id}`);
+        next();
+      } catch (error) {
+        next(new Error('Authentication error'));
+      }
+    });
+  }
+
+  setupEventHandlers() {
+    this.io.on('connection', (socket) => {
+      console.log(`User ${socket.user.id} connected`);
+      
+      // Notify user is online
+      socket.broadcast.emit('user:online', { userId: socket.user.id });
+      
+      // Join room
+      socket.on('join:room', async (roomId) => {
+        await this.joinRoom(socket, roomId);
+      });
+      
+      // Send message
+      socket.on('send:message', async (data) => {
+        await this.handleMessage(socket, data);
+      });
+      
+      // Typing indicator
+      socket.on('typing', (data) => {
+        socket.to(data.roomId).emit('user:typing', {
+          userId: socket.user.id,
+          roomId: data.roomId
+        });
+      });
+      
+      // Read receipt
+      socket.on('message:read', async (messageId) => {
+        await this.markMessageAsRead(socket.user.id, messageId);
+      });
+      
+      // Disconnect
+      socket.on('disconnect', async (reason) => {
+        await this.handleDisconnect(socket, reason);
+      });
+    });
+  }
+
+  async joinRoom(socket, roomId) {
+    // Check if user can join room
+    const canJoin = await this.canAccessRoom(socket.user.id, roomId);
+    
+    if (!canJoin) {
+      socket.emit('error', { message: 'Access denied' });
+      return;
+    }
+    
+    const previousRoom = Array.from(socket.rooms)
+      .find(room => room.startsWith('room:'));
+    
+    if (previousRoom) {
+      socket.leave(previousRoom);
+      socket.to(previousRoom).emit('user:left', {
+        userId: socket.user.id,
+        roomId: previousRoom.replace('room:', '')
+      });
+    }
+    
+    socket.join(`room:${roomId}`);
+    
+    // Load previous messages
+    const messages = await this.loadMessages(roomId, 50);
+    socket.emit('room:messages', { roomId, messages });
+    
+    // Notify others
+    socket.to(`room:${roomId}`).emit('user:joined', {
+      userId: socket.user.id,
+      roomId
+    });
+  }
+
+  async handleMessage(socket, data) {
+    const { roomId, content, type = 'text', metadata = {} } = data;
+    
+    // Validate message
+    if (!content || content.trim().length === 0) {
+      return;
+    }
+    
+    // Save to database
+    const message = await Message.create({
+      roomId,
+      senderId: socket.user.id,
+      content,
+      type,
+      metadata,
+      status: 'sent'
+    });
+    
+    // Emit to room
+    const messageData = {
+      ...message.toJSON(),
+      sender: socket.user
+    };
+    
+    this.io.to(`room:${roomId}`).emit('new:message', messageData);
+    
+    // Store in Redis for offline users
+    const offlineUsers = await this.getOfflineUsersInRoom(roomId);
+    
+    offlineUsers.forEach(userId => {
+      redis.lpush(`offline:messages:${userId}`, JSON.stringify(messageData));
+    });
+    
+    // Update last activity
+    await this.updateRoomActivity(roomId);
+  }
+
+  async handleDisconnect(socket, reason) {
+    console.log(`User ${socket.user.id} disconnected: ${reason}`);
+    
+    // Mark as offline after delay
+    setTimeout(async () => {
+      const sockets = await this.io.in(`user:${socket.user.id}`).allSockets();
+      
+      if (sockets.size === 0) {
+        // User is truly offline
+        await User.update(
+          { online: false, lastSeen: new Date() },
+          { where: { id: socket.user.id } }
+        );
+        
+        socket.broadcast.emit('user:offline', { userId: socket.user.id });
+      }
+    }, 5000);
+  }
+
+  async deliverOfflineMessages(userId) {
+    const messageKey = `offline:messages:${userId}`;
+    const messages = await redis.lrange(messageKey, 0, -1);
+    
+    if (messages.length > 0) {
+      this.io.to(`user:${userId}`).emit('offline:messages', {
+        messages: messages.map(msg => JSON.parse(msg))
+      });
+      
+      await redis.del(messageKey);
+    }
+  }
+}
+```
+
+### Interview Questions
+**Technical:**
+1. Compare WebSocket, SSE, and long-polling for real-time communication.
+2. How do you scale WebSocket servers horizontally?
+3. Explain the difference between Socket.IO rooms and namespaces.
+4. How would you implement message persistence and delivery guarantees?
+5. What are the security considerations for WebSocket connections?
+
+**Scenario-based:**
+1. Your chat service needs to handle 1 million concurrent connections. How would you architect this?
+2. How would you implement typing indicators without flooding the server?
+3. Describe how you would add video/voice call functionality to the chat system.
+4. Messages are being delivered out of order. How would you solve this?
+5. How would you implement end-to-end encryption for private messages?
+
+---
+
+## 6. Online/Offline Status Tracker <a name="onlineoffline-status-tracker"></a>
+
+### Implementation
+```javascript
+// Real-time status tracking with Redis and WebSockets
+class StatusTracker {
+  constructor() {
+    this.redis = new Redis(process.env.REDIS_URL);
+    this.pubsub = this.redis.duplicate();
+    this.statusExpiry = 30; // seconds
+  }
+
+  async userConnected(userId, socketId) {
+    const pipeline = this.redis.pipeline();
+    
+    // Set online status
+    pipeline.hset(`user:status:${userId}`, {
+      status: 'online',
+      lastSeen: Date.now(),
+      socketId
+    });
+    
+    // Add to online users set
+    pipeline.sadd('online:users', userId);
+    
+    // Publish status change
+    pipeline.publish('status:changes', JSON.stringify({
+      userId,
+      status: 'online',
+      timestamp: Date.now()
+    }));
+    
+    // Set expiry
+    pipeline.expire(`user:status:${userId}`, this.statusExpiry);
+    
+    await pipeline.exec();
+    
+    // Subscribe to user's status channel
+    this.pubsub.subscribe(`user:${userId}:status`);
+  }
+
+  async userDisconnected(userId) {
+    const pipeline = this.redis.pipeline();
+    
+    // Update status to offline
+    pipeline.hset(`user:status:${userId}`, {
+      status: 'offline',
+      lastSeen: Date.now()
+    });
+    
+    // Remove from online set
+    pipeline.srem('online:users', userId);
+    
+    // Publish status change
+    pipeline.publish('status:changes', JSON.stringify({
+      userId,
+      status: 'offline',
+      timestamp: Date.now()
+    }));
+    
+    // Don't expire the key immediately
+    pipeline.persist(`user:status:${userId}`);
+    
+    await pipeline.exec();
+  }
+
+  async updateLastSeen(userId) {
+    await this.redis.hset(`user:status:${userId}`, {
+      lastSeen: Date.now()
+    });
+    
+    // Reset expiry for online users
+    await this.redis.expire(`user:status:${userId}`, this.statusExpiry);
+  }
+
+  async getUserStatus(userId) {
+    const status = await this.redis.hgetall(`user:status:${userId}`);
+    
+    if (!status || !status.status) {
+      return { status: 'offline', lastSeen: null };
+    }
+    
+    // Check if user is actually online
+    const isOnline = await this.redis.sismember('online:users', userId);
+    
+    return {
+      status: isOnline ? 'online' : status.status,
+      lastSeen: status.lastSeen,
+      socketId: status.socketId
+    };
+  }
+
+  async getBatchStatus(userIds) {
+    const pipeline = this.redis.pipeline();
+    
+    userIds.forEach(userId => {
+      pipeline.hgetall(`user:status:${userId}`);
+    });
+    
+    const results = await pipeline.exec();
+    
+    return results.map(([error, status], index) => {
+      if (error || !status || !status.status) {
+        return {
+          userId: userIds[index],
+          status: 'offline',
+          lastSeen: null
+        };
+      }
+      
+      return {
+        userId: userIds[index],
+        status: status.status,
+        lastSeen: status.lastSeen
+      };
+    });
+  }
+
+  async cleanupStaleConnections() {
+    // Find users whose status hasn't been updated
+    const onlineUsers = await this.redis.smembers('online:users');
+    
+    const pipeline = this.redis.pipeline();
+    const now = Date.now();
+    const staleThreshold = 5 * 60 * 1000; // 5 minutes
+    
+    onlineUsers.forEach(userId => {
+      pipeline.hgetall(`user:status:${userId}`);
+    });
+    
+    const results = await pipeline.exec();
+    
+    const staleUsers = results
+      .map(([error, status], index) => {
+        if (error || !status || !status.lastSeen) return null;
+        
+        const lastSeen = parseInt(status.lastSeen);
+        if (now - lastSeen > staleThreshold) {
+          return onlineUsers[index];
+        }
+        return null;
+      })
+      .filter(Boolean);
+    
+    // Mark stale users as offline
+    if (staleUsers.length > 0) {
+      const updatePipeline = this.redis.pipeline();
+      
+      staleUsers.forEach(userId => {
+        updatePipeline.hset(`user:status:${userId}`, {
+          status: 'offline',
+          lastSeen: now
+        });
+        updatePipeline.srem('online:users', userId);
+      });
+      
+      await updatePipeline.exec();
     }
   }
 
-  async forgotPassword(forgotPasswordDto: ForgotPasswordDto) {
-    const { email } = forgotPasswordDto;
+  startCleanupInterval() {
+    setInterval(() => {
+      this.cleanupStaleConnections();
+    }, 60000); // Every minute
+  }
+}
+```
 
-    const user = await this.userService.findByEmail(email);
-    if (!user) {
-      // Return success even if user doesn't exist (security best practice)
-      return { message: 'If an account exists, a reset link has been sent' };
+### Interview Questions
+**Technical:**
+1. How do you distinguish between a disconnected user and an idle user?
+2. What are the trade-offs between polling and WebSockets for status updates?
+3. How would you handle network partitions in status tracking?
+4. Explain how you would implement "last seen" functionality.
+5. How do you scale status tracking for millions of users?
+
+**Scenario-based:**
+1. Users are showing as online when they're actually offline. How would you debug this?
+2. How would you implement "typing..." status across multiple devices?
+3. Describe how you would add "away", "busy", and "do not disturb" statuses.
+4. Your status service is consuming too much memory. How would you optimize it?
+5. How would you implement status privacy (who can see your online status)?
+
+---
+
+## 7. Payment Gateway Integration <a name="payment-gateway"></a>
+
+### Stripe Implementation
+```javascript
+// Comprehensive payment service with Stripe
+const Stripe = require('stripe');
+
+class PaymentService {
+  constructor() {
+    this.stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+      apiVersion: '2023-10-16',
+      timeout: 10000,
+      maxNetworkRetries: 3
+    });
+  }
+
+  async createPaymentIntent(amount, currency, metadata = {}) {
+    try {
+      const paymentIntent = await this.stripe.paymentIntents.create({
+        amount: Math.round(amount * 100), // Convert to cents
+        currency: currency.toLowerCase(),
+        metadata,
+        automatic_payment_methods: {
+          enabled: true,
+          allow_redirects: 'never'
+        },
+        capture_method: 'automatic'
+      });
+
+      return {
+        clientSecret: paymentIntent.client_secret,
+        paymentIntentId: paymentIntent.id,
+        status: paymentIntent.status
+      };
+    } catch (error) {
+      this.handleStripeError(error);
     }
+  }
 
-    // Generate reset token
-    const resetToken = this.generateToken();
-    const resetTokenHash = await this.hashToken(resetToken);
-
-    // Store token hash with expiry
-    await this.redisService.setex(
-      `password_reset:${resetTokenHash}`,
-      this.PASSWORD_RESET_EXPIRY,
-      user.id,
+  async handleWebhookEvent(payload, signature) {
+    const event = this.stripe.webhooks.constructEvent(
+      payload,
+      signature,
+      process.env.STRIPE_WEBHOOK_SECRET
     );
 
-    // Send reset email
-    await this.emailService.sendPasswordResetEmail(
-      user.email,
-      user.name,
-      resetToken,
+    switch (event.type) {
+      case 'payment_intent.succeeded':
+        await this.handlePaymentSuccess(event.data.object);
+        break;
+      
+      case 'payment_intent.payment_failed':
+        await this.handlePaymentFailure(event.data.object);
+        break;
+      
+      case 'charge.refunded':
+        await this.handleRefund(event.data.object);
+        break;
+      
+      case 'invoice.payment_succeeded':
+        await this.handleSubscriptionPayment(event.data.object);
+        break;
+    }
+
+    return { processed: true, event: event.type };
+  }
+
+  async createSubscription(customerId, priceId, trialDays = 0) {
+    const subscription = await this.stripe.subscriptions.create({
+      customer: customerId,
+      items: [{ price: priceId }],
+      payment_behavior: 'default_incomplete',
+      expand: ['latest_invoice.payment_intent'],
+      trial_period_days: trialDays,
+      metadata: {
+        created_at: new Date().toISOString()
+      }
+    });
+
+    return {
+      subscriptionId: subscription.id,
+      status: subscription.status,
+      clientSecret: subscription.latest_invoice.payment_intent?.client_secret,
+      currentPeriodEnd: new Date(subscription.current_period_end * 1000)
+    };
+  }
+
+  async handle3DSAuthentication(paymentIntentId) {
+    const paymentIntent = await this.stripe.paymentIntents.retrieve(
+      paymentIntentId,
+      { expand: ['payment_method'] }
     );
 
-    return { message: 'If an account exists, a reset link has been sent' };
-  }
-
-  async resetPassword(resetPasswordDto: ResetPasswordDto) {
-    const { token, newPassword } = resetPasswordDto;
-
-    // Hash token to compare with stored hash
-    const tokenHash = await this.hashToken(token);
-
-    // Get user ID from Redis
-    const userId = await this.redisService.get(`password_reset:${tokenHash}`);
-    if (!userId) {
-      throw new BadRequestException('Invalid or expired reset token');
+    if (paymentIntent.status === 'requires_action' ||
+        paymentIntent.status === 'requires_confirmation') {
+      
+      // Check if 3DS authentication is required
+      if (paymentIntent.next_action?.type === 'redirect_to_url') {
+        return {
+          requiresAction: true,
+          redirectUrl: paymentIntent.next_action.redirect_to_url.url
+        };
+      }
     }
 
-    // Validate password strength
-    this.validatePasswordStrength(newPassword);
-
-    // Hash new password
-    const hashedPassword = await this.hashPassword(newPassword);
-
-    // Update password
-    await this.userService.updatePassword(userId, hashedPassword);
-
-    // Delete used token
-    await this.redisService.del(`password_reset:${tokenHash}`);
-
-    // Revoke all sessions (security measure)
-    await this.sessionService.revokeAll(userId);
-
-    return { message: 'Password has been reset successfully' };
+    return { requiresAction: false };
   }
 
-  async changePassword(
-    userId: string,
-    changePasswordDto: ChangePasswordDto,
-  ) {
-    const { currentPassword, newPassword } = changePasswordDto;
+  async createRefund(chargeId, amount, reason = 'requested_by_customer') {
+    const refund = await this.stripe.refunds.create({
+      charge: chargeId,
+      amount: Math.round(amount * 100),
+      reason,
+      metadata: {
+        refunded_at: new Date().toISOString()
+      }
+    });
 
-    // Get user with password
-    const user = await this.userService.findByIdWithPassword(userId);
-
-    // Verify current password
-    const isValid = await this.verifyPassword(
-      currentPassword,
-      user.password,
+    // Update order status in database
+    await Order.update(
+      { status: 'refunded', refundId: refund.id },
+      { where: { stripeChargeId: chargeId } }
     );
 
-    if (!isValid) {
-      throw new UnauthorizedException('Current password is incorrect');
-    }
-
-    // Validate new password strength
-    this.validatePasswordStrength(newPassword);
-
-    // Hash new password
-    const hashedPassword = await this.hashPassword(newPassword);
-
-    // Update password
-    await this.userService.updatePassword(userId, hashedPassword);
-
-    // Revoke all sessions except current (optional)
-    // await this.sessionService.revokeAllExcept(userId, currentSessionId);
-
-    return { message: 'Password changed successfully' };
+    return {
+      refundId: refund.id,
+      status: refund.status,
+      amount: refund.amount / 100
+    };
   }
 
-  async verifyEmail(verifyEmailDto: VerifyEmailDto) {
-    const { token } = verifyEmailDto;
+  async handlePaymentDispute(disputeId) {
+    const dispute = await this.stripe.disputes.retrieve(disputeId);
+    
+    // Gather evidence
+    const evidence = await this.gatherDisputeEvidence(dispute.charge);
+    
+    await this.stripe.disputes.update(disputeId, {
+      evidence: {
+        product_description: evidence.productDescription,
+        customer_purchase_ip: evidence.customerIp,
+        shipping_address: evidence.shippingAddress,
+        shipping_carrier: evidence.shippingCarrier,
+        shipping_tracking_number: evidence.trackingNumber
+      },
+      metadata: {
+        handled_at: new Date().toISOString()
+      }
+    });
 
-    // Hash token
-    const tokenHash = await this.hashToken(token);
-
-    // Find user with this verification token
-    const user = await this.userService.findByVerificationToken(tokenHash);
-    if (!user) {
-      throw new BadRequestException('Invalid or expired verification token');
-    }
-
-    // Verify email
-    await this.userService.verifyEmail(user.id);
-
-    // Delete verification token
-    await this.userService.clearVerificationToken(user.id);
-
-    return { message: 'Email verified successfully' };
+    // Notify internal team
+    await this.notifyTeamOfDispute(dispute);
   }
 
-  async resendVerificationEmail(email: string) {
-    const user = await this.userService.findByEmail(email);
-    if (!user) {
-      // Don't reveal if user exists
-      return { message: 'If an account exists, a verification email has been sent' };
-    }
+  async generatePaymentReport(startDate, endDate) {
+    const charges = await this.stripe.charges.list({
+      created: {
+        gte: Math.floor(startDate.getTime() / 1000),
+        lte: Math.floor(endDate.getTime() / 1000)
+      },
+      limit: 100
+    });
 
-    if (user.emailVerified) {
-      throw new BadRequestException('Email is already verified');
-    }
-
-    // Generate new verification token
-    const verificationToken = this.generateToken();
-    const verificationTokenHash = await this.hashToken(verificationToken);
-
-    // Update user with new token
-    await this.userService.updateVerificationToken(
-      user.id,
-      verificationTokenHash,
-    );
-
-    // Send verification email
-    await this.emailService.sendVerificationEmail(
-      user.email,
-      user.name,
-      verificationToken,
-    );
-
-    return { message: 'Verification email sent' };
-  }
-
-  private async generateTokens(user: any, sessionId: string) {
-    const payload: TokenPayload = {
-      sub: user.id,
-      email: user.email,
-      sessionId,
-      type: 'access',
+    const report = {
+      totalAmount: 0,
+      successfulPayments: 0,
+      failedPayments: 0,
+      refunds: 0,
+      currencyBreakdown: {},
+      dailyBreakdown: {}
     };
 
-    const refreshPayload: TokenPayload = {
-      ...payload,
-      type: 'refresh',
+    for (const charge of charges.data) {
+      const amount = charge.amount / 100;
+      const date = new Date(charge.created * 1000).toISOString().split('T')[0];
+      
+      if (charge.refunded) {
+        report.refunds += amount;
+      } else if (charge.status === 'succeeded') {
+        report.totalAmount += amount;
+        report.successfulPayments++;
+        
+        // Currency breakdown
+        report.currencyBreakdown[charge.currency] = 
+          (report.currencyBreakdown[charge.currency] || 0) + amount;
+        
+        // Daily breakdown
+        report.dailyBreakdown[date] = 
+          (report.dailyBreakdown[date] || 0) + amount;
+      } else {
+        report.failedPayments++;
+      }
+    }
+
+    return report;
+  }
+
+  handleStripeError(error) {
+    switch (error.type) {
+      case 'StripeCardError':
+        throw new Error(`Card declined: ${error.message}`);
+      
+      case 'StripeRateLimitError':
+        throw new Error('Too many requests. Please try again later.');
+      
+      case 'StripeInvalidRequestError':
+        throw new Error(`Invalid request: ${error.message}`);
+      
+      case 'StripeAPIError':
+        throw new Error('Payment service error. Please try again.');
+      
+      case 'StripeConnectionError':
+        throw new Error('Network error. Please check your connection.');
+      
+      default:
+        throw new Error('Payment processing failed. Please try again.');
+    }
+  }
+}
+
+// Express routes
+router.post('/create-payment-intent', async (req, res) => {
+  try {
+    const { amount, currency, orderId } = req.body;
+    
+    const paymentIntent = await paymentService.createPaymentIntent(
+      amount,
+      currency,
+      { orderId, userId: req.user.id }
+    );
+    
+    res.json(paymentIntent);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+router.post('/webhook', bodyParser.raw({ type: 'application/json' }), 
+  async (req, res) => {
+    const signature = req.headers['stripe-signature'];
+    
+    try {
+      const result = await paymentService.handleWebhookEvent(
+        req.body,
+        signature
+      );
+      
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+);
+```
+
+### Razorpay Implementation (Alternative)
+```javascript
+const Razorpay = require('razorpay');
+
+class RazorpayPaymentService {
+  constructor() {
+    this.razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET
+    });
+  }
+
+  async createOrder(amount, currency, receipt, notes = {}) {
+    const options = {
+      amount: Math.round(amount * 100), // Convert to paise
+      currency: currency.toUpperCase(),
+      receipt: receipt,
+      notes,
+      payment_capture: 1 // Auto capture
     };
 
-    const [accessToken, refreshToken] = await Promise.all([
-      this.jwtService.signAsync(payload, {
-        secret: process.env.JWT_ACCESS_SECRET,
-        expiresIn: this.ACCESS_TOKEN_EXPIRY,
-      }),
-      this.jwtService.signAsync(refreshPayload, {
-        secret: process.env.JWT_REFRESH_SECRET,
-        expiresIn: this.REFRESH_TOKEN_EXPIRY,
-      }),
-    ]);
+    const order = await this.razorpay.orders.create(options);
+    
+    return {
+      orderId: order.id,
+      amount: order.amount / 100,
+      currency: order.currency,
+      status: order.status
+    };
+  }
+
+  async verifyPayment(orderId, paymentId, signature) {
+    const crypto = require('crypto');
+    const body = orderId + '|' + paymentId;
+    
+    const expectedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(body.toString())
+      .digest('hex');
+    
+    return expectedSignature === signature;
+  }
+
+  async createPaymentLink(amount, customer, notes = {}) {
+    const paymentLink = await this.razorpay.paymentLink.create({
+      amount: Math.round(amount * 100),
+      currency: 'INR',
+      description: 'Payment for order',
+      customer: {
+        name: customer.name,
+        email: customer.email,
+        contact: customer.phone
+      },
+      notify: {
+        sms: true,
+        email: true
+      },
+      reminder_enable: true,
+      notes,
+      callback_url: process.env.PAYMENT_SUCCESS_URL,
+      callback_method: 'get'
+    });
+
+    return {
+      paymentLinkId: paymentLink.id,
+      short_url: paymentLink.short_url,
+      status: paymentLink.status
+    };
+  }
+}
+```
+
+### Interview Questions
+**Technical:**
+1. Explain PCI DSS compliance requirements for payment processing.
+2. How do you handle webhook security and idempotency?
+3. What are the different payment methods you've integrated?
+4. How would you implement a retry mechanism for failed payments?
+5. Explain 3D Secure authentication flow.
+
+**Scenario-based:**
+1. A customer reports being charged twice. How would you investigate and resolve this?
+2. How would you implement a subscription system with trial periods and upgrades?
+3. Your payment gateway is down. What fallback strategies would you implement?
+4. Describe how you would handle currency conversion and international payments.
+5. How would you implement fraud detection in payment processing?
+
+---
+
+## 8. Email Service <a name="email-service"></a>
+
+### Implementation
+```javascript
+// Advanced email service with templates, queues, and analytics
+const nodemailer = require('nodemailer');
+const { createTransport } = require('nodemailer');
+const EmailTemplate = require('email-templates');
+const path = require('path');
+
+class EmailService {
+  constructor() {
+    this.transporter = createTransport({
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT,
+      secure: true,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      },
+      pool: true,
+      maxConnections: 5,
+      maxMessages: 100,
+      rateDelta: 1000,
+      rateLimit: 5
+    });
+
+    this.templateEngine = new EmailTemplate({
+      views: {
+        root: path.join(__dirname, 'email-templates'),
+        options: {
+          extension: 'ejs'
+        }
+      },
+      juice: true,
+      juiceResources: {
+        preserveImportant: true,
+        webResources: {
+          relativeTo: path.join(__dirname, 'email-templates')
+        }
+      }
+    });
+
+    this.setupEventListeners();
+  }
+
+  setupEventListeners() {
+    this.transporter.on('idle', () => {
+      while (this.transporter.isIdle()) {
+        // Process queued emails
+        this.processQueue();
+      }
+    });
+  }
+
+  async sendEmail(options) {
+    const {
+      to,
+      subject,
+      template,
+      data = {},
+      attachments = [],
+      cc = [],
+      bcc = [],
+      replyTo,
+      priority = 'normal'
+    } = options;
+
+    try {
+      // Render template
+      const html = await this.templateEngine.render(template, data);
+      const text = this.generateTextVersion(html);
+
+      const mailOptions = {
+        from: `"${process.env.EMAIL_FROM_NAME}" <${process.env.EMAIL_FROM_ADDRESS}>`,
+        to: Array.isArray(to) ? to : [to],
+        subject,
+        html,
+        text,
+        cc,
+        bcc,
+        replyTo,
+        priority,
+        attachments,
+        headers: {
+          'X-Priority': priority === 'high' ? '1' : '3',
+          'X-Mailer': 'OurApp 1.0',
+          'List-Unsubscribe': `<${process.env.UNSUBSCRIBE_URL}>`,
+          'Message-ID': this.generateMessageId()
+        }
+      };
+
+      // Add tracking pixel for analytics
+      if (template !== 'marketing') {
+        mailOptions.html = this.addTrackingPixel(mailOptions.html, options);
+      }
+
+      const info = await this.transporter.sendMail(mailOptions);
+      
+      // Log email sent
+      await this.logEmail({
+        ...options,
+        messageId: info.messageId,
+        response: info.response
+      });
+
+      return {
+        success: true,
+        messageId: info.messageId,
+        previewUrl: nodemailer.getTestMessageUrl(info)
+      };
+    } catch (error) {
+      await this.logError(options, error);
+      throw error;
+    }
+  }
+
+  async sendWelcomeEmail(user) {
+    return this.sendEmail({
+      to: user.email,
+      subject: 'Welcome to OurApp!',
+      template: 'welcome',
+      data: {
+        name: user.name,
+        verificationLink: `${process.env.APP_URL}/verify/${user.verificationToken}`,
+        features: ['Feature 1', 'Feature 2', 'Feature 3']
+      },
+      category: 'welcome'
+    });
+  }
+
+  async sendPasswordResetEmail(user, resetToken) {
+    return this.sendEmail({
+      to: user.email,
+      subject: 'Reset Your Password',
+      template: 'password-reset',
+      data: {
+        name: user.name,
+        resetLink: `${process.env.APP_URL}/reset-password/${resetToken}`,
+        expiryHours: 24
+      },
+      priority: 'high'
+    });
+  }
+
+  async sendTransactionalEmail(type, data) {
+    const templates = {
+      order_confirmation: {
+        subject: 'Your Order Confirmation',
+        template: 'order-confirmation',
+        priority: 'high'
+      },
+      invoice: {
+        subject: 'Invoice for Your Purchase',
+        template: 'invoice',
+        attachments: [{
+          filename: 'invoice.pdf',
+          content: data.invoicePdf
+        }]
+      },
+      support_reply: {
+        subject: 'Re: Your Support Request',
+        template: 'support-reply',
+        replyTo: process.env.SUPPORT_EMAIL
+      }
+    };
+
+    const templateConfig = templates[type];
+    if (!templateConfig) {
+      throw new Error(`Unknown email type: ${type}`);
+    }
+
+    return this.sendEmail({
+      ...templateConfig,
+      to: data.email,
+      data: {
+        ...data,
+        appUrl: process.env.APP_URL,
+        supportEmail: process.env.SUPPORT_EMAIL
+      }
+    });
+  }
+
+  async sendBulkEmails(recipients, template, data) {
+    const batchSize = 50;
+    const results = [];
+    
+    for (let i = 0; i < recipients.length; i += batchSize) {
+      const batch = recipients.slice(i, i + batchSize);
+      
+      const batchPromises = batch.map(recipient =>
+        this.sendEmail({
+          to: recipient.email,
+          subject: data.subject,
+          template,
+          data: {
+            ...data,
+            name: recipient.name,
+            unsubscribeLink: `${process.env.APP_URL}/unsubscribe/${recipient.unsubscribeToken}`
+          },
+          category: 'bulk'
+        }).catch(error => ({
+          success: false,
+          email: recipient.email,
+          error: error.message
+        }))
+      );
+      
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+      
+      // Rate limiting
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    return results;
+  }
+
+  async logEmail(emailData) {
+    await EmailLog.create({
+      messageId: emailData.messageId,
+      recipient: emailData.to,
+      subject: emailData.subject,
+      template: emailData.template,
+      status: 'sent',
+      sentAt: new Date(),
+      metadata: {
+        category: emailData.category,
+        priority: emailData.priority
+      }
+    });
+  }
+
+  async handleBounce(notification) {
+    const { email, bounceType, bounceSubType } = notification;
+    
+    await EmailLog.update(
+      { status: 'bounced', bounceType, bounceSubType },
+      { where: { recipient: email, status: 'sent' } }
+    );
+    
+    // Update user email status
+    await User.update(
+      { emailStatus: 'bounced' },
+      { where: { email } }
+    );
+    
+    // Notify admin if hard bounce
+    if (bounceType === 'Permanent') {
+      await this.sendEmail({
+        to: process.env.ADMIN_EMAIL,
+        subject: 'Email Bounce Alert',
+        template: 'bounce-alert',
+        data: { email, bounceType, bounceSubType },
+        priority: 'high'
+      });
+    }
+  }
+
+  async handleComplaint(notification) {
+    const { email, complaintFeedbackType } = notification;
+    
+    await User.update(
+      { emailStatus: 'complained' },
+      { where: { email } }
+    );
+    
+    // Add to suppression list
+    await SuppressionList.create({
+      email,
+      reason: 'complaint',
+      feedbackType: complaintFeedbackType,
+      reportedAt: new Date()
+    });
+  }
+
+  async getEmailAnalytics(startDate, endDate) {
+    const analytics = await EmailLog.findAll({
+      where: {
+        sentAt: {
+          [Op.between]: [startDate, endDate]
+        }
+      },
+      attributes: [
+        'template',
+        'status',
+        [sequelize.fn('COUNT', sequelize.col('id')), 'count'],
+        [sequelize.fn('DATE', sequelize.col('sentAt')), 'date']
+      ],
+      group: ['template', 'status', 'date'],
+      order: [['date', 'DESC']]
+    });
+    
+    return this.formatAnalytics(analytics);
+  }
+
+  generateTextVersion(html) {
+    // Simple HTML to text conversion
+    return html
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  addTrackingPixel(html, options) {
+    const trackingId = uuid.v4();
+    const pixelUrl = `${process.env.API_URL}/track/email/${trackingId}/pixel.gif`;
+    
+    return html.replace(
+      '</body>',
+      `<img src="${pixelUrl}" width="1" height="1" style="display:none" alt=""/>
+      </body>`
+    );
+  }
+
+  generateMessageId() {
+    return `<${Date.now()}.${Math.random().toString(36).substr(2)}@${process.env.EMAIL_DOMAIN}>`;
+  }
+}
+```
+
+### Interview Questions
+**Technical:**
+1. How do you handle email deliverability and improve inbox placement?
+2. Explain SPF, DKIM, and DMARC records.
+3. How would you implement email template versioning?
+4. What are the considerations for sending bulk emails?
+5. How do you track email opens and clicks?
+
+**Scenario-based:**
+1. Your emails are going to spam. How would you investigate and fix this?
+2. How would you implement an email unsubscribe system that complies with regulations?
+3. Describe how you would handle email bounces and complaints.
+4. Your email sending is being rate-limited. How would you implement queuing and retries?
+5. How would you A/B test different email templates and subject lines?
+
+---
+
+## 9. Refresh Token Rotation <a name="refresh-token-rotation"></a>
+
+### Implementation
+```javascript
+// Secure refresh token rotation with reuse detection
+class TokenService {
+  constructor() {
+    this.tokenFamilySize = 5;
+    this.refreshTokenExpiry = '7d';
+    this.accessTokenExpiry = '15m';
+  }
+
+  async generateTokenPair(user) {
+    const accessToken = jwt.sign(
+      {
+        userId: user.id,
+        email: user.email,
+        type: 'access'
+      },
+      process.env.JWT_ACCESS_SECRET,
+      { expiresIn: this.accessTokenExpiry }
+    );
+
+    const refreshToken = crypto.randomBytes(40).toString('hex');
+    const refreshTokenHash = this.hashToken(refreshToken);
+    
+    // Create token family
+    const tokenFamily = await this.createTokenFamily(
+      user.id, 
+      refreshTokenHash
+    );
 
     return {
       accessToken,
       refreshToken,
-      expiresIn: 900, // 15 minutes in seconds
+      tokenFamilyId: tokenFamily.id
     };
   }
 
-  private async hashPassword(password: string): Promise<string> {
-    return bcrypt.hash(password, this.SALT_ROUNDS);
-  }
-
-  private async verifyPassword(
-    plainPassword: string,
-    hashedPassword: string,
-  ): Promise<boolean> {
-    return bcrypt.compare(plainPassword, hashedPassword);
-  }
-
-  private async hashToken(token: string): Promise<string> {
-    return crypto.createHash('sha256').update(token).digest('hex');
-  }
-
-  private generateToken(): string {
-    return crypto.randomBytes(32).toString('hex');
-  }
-
-  private validatePasswordStrength(password: string): void {
-    const minLength = 8;
-    const hasUpperCase = /[A-Z]/.test(password);
-    const hasLowerCase = /[a-z]/.test(password);
-    const hasNumbers = /\d/.test(password);
-    const hasSpecialChars = /[!@#$%^&*(),.?":{}|<>]/.test(password);
-
-    if (password.length < minLength) {
-      throw new BadRequestException(
-        `Password must be at least ${minLength} characters long`,
-      );
-    }
-
-    if (!hasUpperCase || !hasLowerCase) {
-      throw new BadRequestException(
-        'Password must contain both uppercase and lowercase letters',
-      );
-    }
-
-    if (!hasNumbers) {
-      throw new BadRequestException('Password must contain at least one number');
-    }
-
-    if (!hasSpecialChars) {
-      throw new BadRequestException(
-        'Password must contain at least one special character',
-      );
-    }
-
-    // Check for common passwords
-    const commonPasswords = [
-      'password',
-      '123456',
-      'qwerty',
-      'letmein',
-      'welcome',
-    ];
-    if (commonPasswords.includes(password.toLowerCase())) {
-      throw new BadRequestException('Password is too common');
-    }
-  }
-
-  // Security monitoring
-  async logSecurityEvent(
-    userId: string,
-    eventType: string,
-    details: Record<string, any>,
-  ) {
-    await this.redisService.publish('security-events', JSON.stringify({
-      userId,
-      eventType,
-      details,
-      timestamp: new Date().toISOString(),
-      ipAddress: details.ipAddress,
-      userAgent: details.userAgent,
-    }));
-  }
-}
-```
-
-#### **JWT Strategy with Redis Blacklist**
-
-```typescript
-// src/auth/jwt.strategy.ts
-import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { PassportStrategy } from '@nestjs/passport';
-import { ExtractJwt, Strategy } from 'passport-jwt';
-import { RedisService } from '../redis/redis.service';
-
-@Injectable()
-export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
-  constructor(private readonly redisService: RedisService) {
-    super({
-      jwtFromRequest: ExtractJwt.fromExtractors([
-        (req) => {
-          let token = null;
-          if (req && req.cookies) {
-            token = req.cookies['access_token'];
-          }
-          return token || ExtractJwt.fromAuthHeaderAsBearerToken()(req);
-        },
-      ]),
-      secretOrKey: process.env.JWT_ACCESS_SECRET,
-      ignoreExpiration: false,
-      passReqToCallback: true,
-    });
-  }
-
-  async validate(req: Request, payload: any) {
-    // Check if token is blacklisted
-    const isBlacklisted = await this.redisService.get(
-      `blacklist:${payload.sessionId}`,
-    );
+  async refreshAccessToken(refreshToken, tokenFamilyId) {
+    // 1. Verify token family exists and is not revoked
+    const tokenFamily = await TokenFamily.findByPk(tokenFamilyId);
     
-    if (isBlacklisted) {
-      throw new UnauthorizedException('Token has been revoked');
+    if (!tokenFamily || tokenFamily.revoked) {
+      throw new Error('Invalid refresh token');
     }
 
-    // Get additional user data if needed
-    return {
-      userId: payload.sub,
-      email: payload.email,
-      sessionId: payload.sessionId,
-      // Add any other claims you need
-    };
-  }
-}
-
-// Refresh token strategy
-@Injectable()
-export class RefreshJwtStrategy extends PassportStrategy(
-  Strategy,
-  'jwt-refresh',
-) {
-  constructor(private readonly redisService: RedisService) {
-    super({
-      jwtFromRequest: ExtractJwt.fromExtractors([
-        (req) => {
-          let token = null;
-          if (req && req.cookies) {
-            token = req.cookies['refresh_token'];
-          }
-          return token;
-        },
-      ]),
-      secretOrKey: process.env.JWT_REFRESH_SECRET,
-      ignoreExpiration: false,
-      passReqToCallback: true,
-    });
-  }
-
-  async validate(req: Request, payload: any) {
-    if (payload.type !== 'refresh') {
-      throw new UnauthorizedException('Invalid token type');
-    }
-
-    // Check if refresh token is blacklisted
-    const isBlacklisted = await this.redisService.get(
-      `blacklist:${payload.sessionId}`,
+    // 2. Verify the refresh token
+    const refreshTokenHash = this.hashToken(refreshToken);
+    const isValid = await this.verifyTokenInFamily(
+      tokenFamily.id, 
+      refreshTokenHash
     );
-    
-    if (isBlacklisted) {
-      throw new UnauthorizedException('Token has been revoked');
+
+    if (!isValid) {
+      // Possible token reuse - revoke entire family
+      await this.revokeTokenFamily(tokenFamily.id);
+      throw new Error('Token reuse detected');
     }
+
+    // 3. Get user
+    const user = await User.findByPk(tokenFamily.userId);
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    // 4. Generate new token pair
+    const newRefreshToken = crypto.randomBytes(40).toString('hex');
+    const newRefreshTokenHash = this.hashToken(newRefreshToken);
+
+    // 5. Rotate tokens
+    await this.rotateTokens(
+      tokenFamily.id,
+      refreshTokenHash,
+      newRefreshTokenHash
+    );
+
+    // 6. Generate new access token
+    const newAccessToken = jwt.sign(
+      {
+        userId: user.id,
+        email: user.email,
+        type: 'access'
+      },
+      process.env.JWT_ACCESS_SECRET,
+      { expiresIn: this.accessTokenExpiry }
+    );
 
     return {
-      userId: payload.sub,
-      email: payload.email,
-      sessionId: payload.sessionId,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+      tokenFamilyId: tokenFamily.id
     };
   }
-}
-```
 
-#### **Session Management**
+  async createTokenFamily(userId, initialTokenHash) {
+    const transaction = await sequelize.transaction();
+    
+    try {
+      // Check if user has too many active token families
+      const activeFamilies = await TokenFamily.count({
+        where: {
+          userId,
+          revoked: false
+        },
+        transaction
+      });
 
-```typescript
-// src/session/session.service.ts
-import { Injectable } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
-import { RedisService } from '../redis/redis.service';
+      if (activeFamilies >= 5) {
+        // Revoke oldest family
+        const oldestFamily = await TokenFamily.findOne({
+          where: { userId, revoked: false },
+          order: [['createdAt', 'ASC']],
+          transaction
+        });
 
-interface SessionDocument {
-  id: string;
-  userId: string;
-  userAgent: string;
-  ipAddress: string;
-  lastActivity: Date;
-  createdAt: Date;
-  revoked: boolean;
-}
+        if (oldestFamily) {
+          await oldestFamily.update({ revoked: true }, { transaction });
+        }
+      }
 
-@Injectable()
-export class SessionService {
-  constructor(
-    @InjectModel('Session') private sessionModel: Model<SessionDocument>,
-    private readonly redisService: RedisService,
-  ) {}
+      // Create new token family
+      const tokenFamily = await TokenFamily.create({
+        userId,
+        createdAt: new Date(),
+        revoked: false
+      }, { transaction });
 
-  async create(sessionData: {
-    userId: string;
-    userAgent: string;
-    ipAddress: string;
-  }) {
-    const session = new this.sessionModel({
-      ...sessionData,
-      id: this.generateSessionId(),
-      lastActivity: new Date(),
-      createdAt: new Date(),
-      revoked: false,
-    });
+      // Add initial token to family
+      await TokenFamilyMember.create({
+        familyId: tokenFamily.id,
+        tokenHash: initialTokenHash,
+        used: false,
+        createdAt: new Date()
+      }, { transaction });
 
-    await session.save();
-
-    // Cache session in Redis
-    await this.redisService.setex(
-      `session:${session.id}`,
-      86400, // 24 hours
-      JSON.stringify({
-        userId: session.userId,
-        userAgent: session.userAgent,
-        ipAddress: session.ipAddress,
-      }),
-    );
-
-    return session;
+      await transaction.commit();
+      return tokenFamily;
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   }
 
-  async findById(sessionId: string) {
-    // Try cache first
-    const cached = await this.redisService.get(`session:${sessionId}`);
-    if (cached) {
-      return JSON.parse(cached);
-    }
-
-    // Fall back to database
-    const session = await this.sessionModel.findOne({
-      id: sessionId,
-      revoked: false,
-    });
-
-    if (session) {
-      // Update cache
-      await this.redisService.setex(
-        `session:${sessionId}`,
-        3600,
-        JSON.stringify(session),
+  async rotateTokens(familyId, oldTokenHash, newTokenHash) {
+    const transaction = await sequelize.transaction();
+    
+    try {
+      // Mark old token as used
+      await TokenFamilyMember.update(
+        { used: true, usedAt: new Date() },
+        {
+          where: {
+            familyId,
+            tokenHash: oldTokenHash,
+            used: false
+          },
+          transaction
+        }
       );
+
+      // Check family size
+      const familySize = await TokenFamilyMember.count({
+        where: { familyId },
+        transaction
+      });
+
+      // Remove oldest token if family size exceeds limit
+      if (familySize >= this.tokenFamilySize) {
+        const oldestToken = await TokenFamilyMember.findOne({
+          where: { familyId },
+          order: [['createdAt', 'ASC']],
+          transaction
+        });
+
+        if (oldestToken) {
+          await oldestToken.destroy({ transaction });
+        }
+      }
+
+      // Add new token
+      await TokenFamilyMember.create({
+        familyId,
+        tokenHash: newTokenHash,
+        used: false,
+        createdAt: new Date()
+      }, { transaction });
+
+      await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
     }
-
-    return session;
   }
 
-  async revoke(sessionId: string) {
-    await Promise.all([
-      this.sessionModel.updateOne(
-        { id: sessionId },
-        { revoked: true, revokedAt: new Date() },
-      ),
-      this.redisService.del(`session:${sessionId}`),
-      this.redisService.setex(`blacklist:${sessionId}`, 3600, 'true'),
-    ]);
-  }
-
-  async revokeAll(userId: string) {
-    const sessions = await this.sessionModel.find({
-      userId,
-      revoked: false,
+  async verifyTokenInFamily(familyId, tokenHash) {
+    const tokenMember = await TokenFamilyMember.findOne({
+      where: {
+        familyId,
+        tokenHash,
+        used: false
+      }
     });
 
-    await Promise.all([
-      this.sessionModel.updateMany(
-        { userId, revoked: false },
-        { revoked: true, revokedAt: new Date() },
-      ),
-      ...sessions.map((session) =>
-        Promise.all([
-          this.redisService.del(`session:${session.id}`),
-          this.redisService.setex(`blacklist:${session.id}`, 3600, 'true'),
-        ]),
-      ),
-    ]);
+    return !!tokenMember;
   }
 
-  async updateLastActivity(sessionId: string) {
-    await this.sessionModel.updateOne(
-      { id: sessionId },
-      { lastActivity: new Date() },
+  async revokeTokenFamily(familyId) {
+    await TokenFamily.update(
+      { revoked: true, revokedAt: new Date() },
+      { where: { id: familyId } }
+    );
+
+    // Log the revocation for security monitoring
+    await SecurityLog.create({
+      event: 'token_family_revoked',
+      familyId,
+      reason: 'possible_token_reuse',
+      timestamp: new Date()
+    });
+  }
+
+  async revokeAllUserTokens(userId) {
+    await TokenFamily.update(
+      { revoked: true, revokedAt: new Date() },
+      { where: { userId } }
     );
   }
 
-  async getUserSessions(userId: string) {
-    return this.sessionModel.find({
-      userId,
-      revoked: false,
-    }).sort({ lastActivity: -1 });
+  hashToken(token) {
+    return crypto
+      .createHash('sha256')
+      .update(token)
+      .digest('hex');
   }
 
-  async cleanupExpiredSessions(maxAgeDays: number = 30) {
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - maxAgeDays);
+  async cleanupExpiredTokens() {
+    const expiryDate = new Date();
+    expiryDate.setDate(expiryDate.getDate() - 30); // 30 days ago
 
-    const expiredSessions = await this.sessionModel.find({
-      lastActivity: { $lt: cutoffDate },
-      revoked: false,
+    await TokenFamily.destroy({
+      where: {
+        revoked: true,
+        revokedAt: {
+          [Op.lt]: expiryDate
+        }
+      }
     });
-
-    await Promise.all([
-      this.sessionModel.updateMany(
-        { lastActivity: { $lt: cutoffDate }, revoked: false },
-        { revoked: true, revokedAt: new Date() },
-      ),
-      ...expiredSessions.map((session) =>
-        this.redisService.del(`session:${session.id}`),
-      ),
-    ]);
-
-    return expiredSessions.length;
-  }
-
-  private generateSessionId(): string {
-    return `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   }
 }
+
+// Middleware
+const authenticate = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+      req.user = decoded;
+      next();
+    } catch (error) {
+      if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({ 
+          error: 'Token expired',
+          code: 'TOKEN_EXPIRED'
+        });
+      }
+      throw error;
+    }
+  } catch (error) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
+
+// Refresh endpoint
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refreshToken, tokenFamilyId } = req.body;
+    
+    const tokens = await tokenService.refreshAccessToken(
+      refreshToken,
+      tokenFamilyId
+    );
+    
+    res.json(tokens);
+  } catch (error) {
+    if (error.message === 'Token reuse detected') {
+      // Send security alert
+      await SecurityAlert.create({
+        userId: req.user?.id,
+        type: 'token_reuse',
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent']
+      });
+      
+      return res.status(401).json({ 
+        error: 'Security alert: Session compromised',
+        code: 'SESSION_COMPROMISED'
+      });
+    }
+    
+    res.status(401).json({ error: error.message });
+  }
+});
 ```
 
-### 🎯 Real-World Scenario: Banking Application Authentication
-*You're building authentication for a banking application that requires MFA, device management, and compliance with financial regulations. The system must prevent account takeover and support suspicious activity detection.*
+### Interview Questions
+**Technical:**
+1. Explain the concept of refresh token rotation and why it's important.
+2. How do you detect refresh token reuse?
+3. What are the security considerations for storing refresh tokens?
+4. How would you implement token blacklisting?
+5. Explain the trade-offs between JWT and database sessions.
 
-**Interview Questions:**
-1. How would you implement multi-factor authentication (MFA)?
-2. What strategies would you use for device fingerprinting and recognition?
-3. How do you detect and prevent brute force attacks?
-4. What compliance requirements (PCI DSS, GDPR) affect authentication design?
-5. How would you implement step-up authentication for sensitive operations?
-
-**Technical Questions:**
-1. How do you prevent JWT token theft and replay attacks?
-2. What's the difference between session-based and token-based authentication?
-3. How do you implement rate limiting for authentication endpoints?
-4. What are the security considerations for password reset flows?
+**Scenario-based:**
+1. How would you handle a situation where refresh tokens are being stolen?
+2. Describe how you would implement "log out from all devices" functionality.
+3. Your token service needs to handle 10,000 refresh requests per second. How would you scale it?
+4. How would you migrate from a simple JWT system to refresh token rotation without logging users out?
+5. A user reports unauthorized access to their account. How would you investigate using token logs?
 
 ---
 
-## 2. Role-based Permissions
+## 10. Background Jobs <a name="background-jobs"></a>
 
-### 📖 In-Depth Explanation
+### BullMQ Implementation
+```javascript
+// Advanced job queue system with BullMQ and Redis
+const { Queue, Worker, QueueEvents, Job } = require('bullmq');
+const IORedis = require('ioredis');
 
-RBAC (Role-Based Access Control) with fine-grained permissions using a hierarchical permission system.
+class JobQueueService {
+  constructor() {
+    this.connection = new IORedis(process.env.REDIS_URL, {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: false
+    });
 
-#### **Complete RBAC Implementation**
+    this.queues = new Map();
+    this.workers = new Map();
+    this.queueEvents = new Map();
 
-```typescript
-// src/rbac/rbac.module.ts
-import { Module, Global } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { RbacService } from './rbac.service';
-import { PermissionGuard } from './guards/permission.guard';
-import { RoleGuard } from './guards/role.guard';
-import {
-  Role,
-  Permission,
-  UserRole,
-  RolePermission,
-  Resource,
-} from './entities';
+    this.setupGlobalEventListeners();
+  }
 
-@Global()
-@Module({
-  imports: [
-    TypeOrmModule.forFeature([
-      Role,
-      Permission,
-      UserRole,
-      RolePermission,
-      Resource,
-    ]),
-  ],
-  providers: [RbacService, PermissionGuard, RoleGuard],
-  exports: [RbacService, PermissionGuard, RoleGuard],
-})
-export class RbacModule {}
+  async createQueue(name, options = {}) {
+    if (this.queues.has(name)) {
+      return this.queues.get(name);
+    }
 
-// src/rbac/entities/index.ts
-import {
-  Entity,
-  Column,
-  PrimaryGeneratedColumn,
-  CreateDateColumn,
-  UpdateDateColumn,
-  ManyToMany,
-  JoinTable,
-  OneToMany,
-  ManyToOne,
-  JoinColumn,
-  Index,
-} from 'typeorm';
+    const queue = new Queue(name, {
+      connection: this.connection,
+      defaultJobOptions: {
+        removeOnComplete: 100, // Keep last 100 completed jobs
+        removeOnFail: 1000, // Keep last 1000 failed jobs
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 1000
+        },
+        ...options.defaultJobOptions
+      },
+      ...options.queueOptions
+    });
 
-// Resource entity
-@Entity('resources')
-export class Resource {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
+    const queueEvents = new QueueEvents(name, {
+      connection: this.connection
+    });
 
-  @Column({ unique: true })
-  name: string;
+    this.queues.set(name, queue);
+    this.queueEvents.set(name, queueEvents);
 
-  @Column()
-  description: string;
+    this.setupQueueEventListeners(name, queueEvents);
 
-  @Column({ default: true })
-  isActive: boolean;
+    return queue;
+  }
 
-  @CreateDateColumn()
-  createdAt: Date;
+  setupQueueEventListeners(name, queueEvents) {
+    queueEvents.on('completed', ({ jobId, returnvalue }) => {
+      console.log(`Job ${jobId} completed in queue ${name}`);
+      this.emit('job:completed', { queue: name, jobId, result: returnvalue });
+    });
 
-  @UpdateDateColumn()
-  updatedAt: Date;
+    queueEvents.on('failed', ({ jobId, failedReason }) => {
+      console.error(`Job ${jobId} failed in queue ${name}:`, failedReason);
+      this.emit('job:failed', { queue: name, jobId, error: failedReason });
+      
+      // Send alert for critical failures
+      if (name === 'critical') {
+        this.sendJobFailureAlert(name, jobId, failedReason);
+      }
+    });
 
-  @OneToMany(() => Permission, (permission) => permission.resource)
-  permissions: Permission[];
+    queueEvents.on('stalled', ({ jobId }) => {
+      console.warn(`Job ${jobId} stalled in queue ${name}`);
+      this.emit('job:stalled', { queue: name, jobId });
+    });
+
+    queueEvents.on('progress', ({ jobId, data }) => {
+      this.emit('job:progress', { queue: name, jobId, progress: data });
+    });
+  }
+
+  async addJob(queueName, jobName, data, options = {}) {
+    const queue = await this.createQueue(queueName);
+    
+    const job = await queue.add(jobName, data, {
+      jobId: options.jobId || `${jobName}-${Date.now()}-${Math.random().toString(36).substr(2)}`,
+      priority: options.priority || 0,
+      delay: options.delay,
+      repeat: options.repeat,
+      ...options
+    });
+
+    return job;
+  }
+
+  async addBulkJobs(queueName, jobs) {
+    const queue = await this.createQueue(queueName);
+    
+    const bullJobs = jobs.map(job => ({
+      name: job.name,
+      data: job.data,
+      opts: job.options
+    }));
+
+    const addedJobs = await queue.addBulk(bullJobs);
+    return addedJobs;
+  }
+
+  createWorker(queueName, processor, options = {}) {
+    if (this.workers.has(queueName)) {
+      return this.workers.get(queueName);
+    }
+
+    const worker = new Worker(queueName, processor, {
+      connection: this.connection,
+      concurrency: options.concurrency || 1,
+      limiter: options.limiter,
+      ...options
+    });
+
+    worker.on('completed', (job) => {
+      console.log(`Worker completed job ${job.id} in ${queueName}`);
+    });
+
+    worker.on('failed', (job, err) => {
+      console.error(`Worker failed job ${job?.id} in ${queueName}:`, err);
+    });
+
+    worker.on('stalled', (jobId) => {
+      console.warn(`Worker stalled job ${jobId} in ${queueName}`);
+    });
+
+    worker.on('error', (err) => {
+      console.error(`Worker error in ${queueName}:`, err);
+    });
+
+    this.workers.set(queueName, worker);
+    return worker;
+  }
+
+  // Job processors
+  async emailProcessor(job) {
+    const { to, subject, template, data } = job.data;
+    
+    try {
+      await emailService.sendEmail({
+        to,
+        subject,
+        template,
+        data
+      });
+      
+      return { success: true, sentAt: new Date() };
+    } catch (error) {
+      throw new Error(`Email sending failed: ${error.message}`);
+    }
+  }
+
+  async imageProcessor(job) {
+    const { imageBuffer, transformations } = job.data;
+    
+    let image = sharp(imageBuffer);
+    
+    for (const transformation of transformations) {
+      switch (transformation.type) {
+        case 'resize':
+          image = image.resize(transformation.width, transformation.height, {
+            fit: transformation.fit || 'cover'
+          });
+          break;
+        
+        case 'crop':
+          image = image.extract(transformation);
+          break;
+        
+        case 'format':
+          image = image.toFormat(transformation.format, {
+            quality: transformation.quality
+          });
+          break;
+        
+        case 'watermark':
+          const watermark = await sharp(transformation.watermarkBuffer)
+            .resize(transformation.size)
+            .toBuffer();
+          
+          image = image.composite([{
+            input: watermark,
+            gravity: transformation.position
+          }]);
+          break;
+      }
+      
+      // Report progress
+      await job.updateProgress(Math.floor(
+        (transformations.indexOf(transformation) + 1) / transformations.length * 100
+      ));
+    }
+    
+    const processedBuffer = await image.toBuffer();
+    return processedBuffer;
+  }
+
+  async reportProcessor(job) {
+    const { startDate, endDate, reportType, email } = job.data;
+    
+    // Generate report
+    let reportData;
+    switch (reportType) {
+      case 'sales':
+        reportData = await salesService.generateSalesReport(startDate, endDate);
+        break;
+      
+      case 'user_activity':
+        reportData = await analyticsService.getUserActivityReport(startDate, endDate);
+        break;
+      
+      case 'system_health':
+        reportData = await monitoringService.getSystemHealthReport();
+        break;
+    }
+    
+    // Generate PDF
+    const pdfBuffer = await pdfService.generatePdf(reportData);
+    
+    // Send email with attachment
+    await emailService.sendEmail({
+      to: email,
+      subject: `Your ${reportType} Report`,
+      template: 'report',
+      data: { reportType, startDate, endDate },
+      attachments: [{
+        filename: `${reportType}_report_${Date.now()}.pdf`,
+        content: pdfBuffer,
+        contentType: 'application/pdf'
+      }]
+    });
+    
+    return { 
+      success: true, 
+      reportType, 
+      generatedAt: new Date(),
+      size: pdfBuffer.length 
+    };
+  }
+
+  async dataSyncProcessor(job) {
+    const { source, destination, data } = job.data;
+    
+    const batchSize = 1000;
+    let processed = 0;
+    let errors = [];
+    
+    for (let i = 0; i < data.length; i += batchSize) {
+      const batch = data.slice(i, i + batchSize);
+      
+      try {
+        await this.syncBatch(source, destination, batch);
+        processed += batch.length;
+        
+        // Update progress
+        await job.updateProgress(Math.floor(processed / data.length * 100));
+        
+        // Throttle to avoid overwhelming systems
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } catch (error) {
+        errors.push({
+          batch: i / batchSize,
+          error: error.message
+        });
+        
+        // Continue with next batch despite errors
+        continue;
+      }
+    }
+    
+    return {
+      processed,
+      total: data.length,
+      errors: errors.length,
+      errorDetails: errors
+    };
+  }
+
+  async scheduleRecurringJob(queueName, jobName, cronPattern, data) {
+    const queue = await this.createQueue(queueName);
+    
+    await queue.add(jobName, data, {
+      repeat: {
+        pattern: cronPattern,
+        tz: 'UTC'
+      },
+      jobId: `recurring-${jobName}`
+    });
+  }
+
+  async getQueueMetrics(queueName) {
+    const queue = this.queues.get(queueName);
+    if (!queue) return null;
+    
+    const [
+      waiting,
+      active,
+      completed,
+      failed,
+      delayed
+    ] = await Promise.all([
+      queue.getWaitingCount(),
+      queue.getActiveCount(),
+      queue.getCompletedCount(),
+      queue.getFailedCount(),
+      queue.getDelayedCount()
+    ]);
+    
+    return {
+      waiting,
+      active,
+      completed,
+      failed,
+      delayed,
+      total: waiting + active + completed + failed + delayed
+    };
+  }
+
+  async retryFailedJobs(queueName, count = 100) {
+    const queue = this.queues.get(queueName);
+    if (!queue) throw new Error(`Queue ${queueName} not found`);
+    
+    const failedJobs = await queue.getFailed(0, count - 1);
+    
+    const retriedJobs = [];
+    for (const job of failedJobs) {
+      if (job.attemptsMade < job.opts.attempts) {
+        await job.retry();
+        retriedJobs.push(job.id);
+      }
+    }
+    
+    return retriedJobs;
+  }
+
+  async cleanupOldJobs(queueName, days = 30) {
+    const queue = this.queues.get(queueName);
+    if (!queue) throw new Error(`Queue ${queueName} not found`);
+    
+    const cutoffDate = Date.now() - (days * 24 * 60 * 60 * 1000);
+    
+    // Remove old completed jobs
+    await queue.obliterate({ force: true });
+    
+    // Clean Redis memory
+    await this.connection.sendCommand(['MEMORY', 'PURGE']);
+  }
+
+  async sendJobFailureAlert(queueName, jobId, error) {
+    await emailService.sendEmail({
+      to: process.env.ALERT_EMAIL,
+      subject: `Job Failure Alert: ${queueName}`,
+      template: 'job-failure-alert',
+      data: {
+        queueName,
+        jobId,
+        error,
+        timestamp: new Date().toISOString()
+      },
+      priority: 'high'
+    });
+  }
+
+  emit(event, data) {
+    // Implement event emitter pattern
+    // This allows other services to listen for job events
+  }
 }
 
-// Permission entity
-@Entity('permissions')
-@Index(['resourceId', 'action'], { unique: true })
-export class Permission {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
+// Usage examples
+const jobService = new JobQueueService();
 
-  @Column()
-  name: string;
+// Setup workers
+jobService.createWorker('email', jobService.emailProcessor, { concurrency: 5 });
+jobService.createWorker('image-processing', jobService.imageProcessor, { concurrency: 3 });
+jobService.createWorker('reports', jobService.reportProcessor);
+jobService.createWorker('data-sync', jobService.dataSyncProcessor, { concurrency: 1 });
 
-  @Column()
-  action: string; // create, read, update, delete, approve, etc.
+// Schedule recurring jobs
+await jobService.scheduleRecurringJob(
+  'maintenance',
+  'cleanup-old-data',
+  '0 2 * * *', // Daily at 2 AM
+  { type: 'data_cleanup' }
+);
 
-  @Column()
-  resourceId: string;
+await jobService.scheduleRecurringJob(
+  'analytics',
+  'generate-daily-report',
+  '0 1 * * *', // Daily at 1 AM
+  { reportType: 'daily_summary' }
+);
 
-  @ManyToOne(() => Resource, (resource) => resource.permissions)
-  @JoinColumn({ name: 'resourceId' })
-  resource: Resource;
+// Add jobs
+await jobService.addJob('email', 'welcome-email', {
+  to: 'user@example.com',
+  subject: 'Welcome!',
+  template: 'welcome',
+  data: { name: 'John' }
+});
 
-  @Column({ type: 'text', nullable: true })
-  description: string;
+await jobService.addJob('image-processing', 'process-profile-picture', {
+  imageBuffer: buffer,
+  transformations: [
+    { type: 'resize', width: 500, height: 500 },
+    { type: 'format', format: 'webp', quality: 80 }
+  ]
+}, {
+  priority: 1
+});
 
-  @Column({ default: true })
-  isActive: boolean;
+// Bulk add
+await jobService.addBulkJobs('email', [
+  {
+    name: 'newsletter',
+    data: { to: 'user1@example.com', subject: 'Newsletter', template: 'newsletter' },
+    options: { priority: 3 }
+  },
+  {
+    name: 'newsletter',
+    data: { to: 'user2@example.com', subject: 'Newsletter', template: 'newsletter' },
+    options: { priority: 3 }
+  }
+]);
+```
 
-  @CreateDateColumn()
-  createdAt: Date;
+### Kafka Implementation (Alternative for High Throughput)
+```javascript
+const { Kafka, Partitioners } = require('kafkajs');
 
-  @UpdateDateColumn()
-  updatedAt: Date;
+class KafkaJobService {
+  constructor() {
+    this.kafka = new Kafka({
+      clientId: 'job-service',
+      brokers: process.env.KAFKA_BROKERS.split(','),
+      ssl: process.env.KAFKA_SSL === 'true',
+      sasl: process.env.KAFKA_USERNAME ? {
+        mechanism: 'plain',
+        username: process.env.KAFKA_USERNAME,
+        password: process.env.KAFKA_PASSWORD
+      } : undefined
+    });
 
-  @ManyToMany(() => Role, (role) => role.permissions)
-  roles: Role[];
-}
+    this.producer = this.kafka.producer({
+      createPartitioner: Partitioners.LegacyPartitioner,
+      transactionTimeout: 30000
+    });
 
-// Role entity with hierarchy support
-@Entity('roles')
-export class Role {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
+    this.consumers = new Map();
+  }
 
-  @Column({ unique: true })
-  name: string;
+  async publishJob(topic, job) {
+    await this.producer.connect();
+    
+    const messages = [{
+      key: job.jobId || `${job.type}-${Date.now()}`,
+      value: JSON.stringify({
+        ...job,
+        publishedAt: new Date().toISOString(),
+        metadata: {
+          source: 'job-service',
+          version: '1.0'
+        }
+      }),
+      headers: {
+        'job-type': job.type,
+        'priority': job.priority?.toString() || '0'
+      }
+    }];
 
-  @Column()
-  description: string;
+    await this.producer.send({
+      topic,
+      messages,
+      acks: -1 // All replicas acknowledge
+    });
+  }
 
-  @Column({ nullable: true })
-  parentId: string;
+  async consumeJobs(topic, groupId, processor) {
+    const consumer = this.kafka.consumer({ 
+      groupId,
+      sessionTimeout: 30000,
+      heartbeatInterval: 3000,
+      maxBytesPerPartition: 1048576, // 1MB
+      retry: {
+        retries: 10
+      }
+    });
 
-  @ManyToOne(() => Role, (role) => role.children)
-  @JoinColumn({ name: 'parentId' })
-  parent: Role;
+    await consumer.connect();
+    await consumer.subscribe({ topic, fromBeginning: false });
 
-  @OneToMany(() => Role, (role) => role.parent)
-  children: Role[];
+    await consumer.run({
+      eachMessage: async ({ topic, partition, message }) => {
+        try {
+          const job = JSON.parse(message.value.toString());
+          
+          // Process the job
+          const result = await processor(job);
+          
+          // Commit offset if successful
+          await consumer.commitOffsets([{
+            topic,
+            partition,
+            offset: (Number(message.offset) + 1).toString()
+          }]);
+          
+          // Log success
+          await this.logJobCompletion(topic, job, result);
+        } catch (error) {
+          console.error(`Error processing job in ${topic}:`, error);
+          
+          // Move to dead letter queue
+          await this.sendToDLQ(topic, message, error);
+        }
+      },
+      autoCommit: false
+    });
 
-  @Column({ type: 'int', default: 0 })
-  level: number; // Hierarchy level for quick lookup
+    this.consumers.set(`${topic}-${groupId}`, consumer);
+  }
 
-  @Column({ default: true })
-  isActive: boolean;
+  async sendToDLQ(topic, message, error) {
+    const dlqMessage = {
+      originalTopic: topic,
+      originalMessage: message,
+      error: error.message,
+      failedAt: new Date().toISOString()
+    };
 
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-
-  @ManyToMany(() => Permission, (permission) => permission.roles)
-  @JoinTable({
-    name: 'role_permissions',
-    joinColumn: { name: 'roleId', referencedColumnName: 'id' },
-    inverseJoinColumn: { name: 'permissionId', referencedColumnName: 'id' },
-  })
-  permissions: Permission[];
-
-  @OneToMany(() => UserRole, (userRole) => userRole.role)
-  userRoles: UserRole[];
-}
-
-// User-Role mapping
-@Entity('user_roles')
-@Index(['userId', 'roleId'], { unique: true })
-export class UserRole {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @Column()
-  userId: string;
-
-  @Column()
-  roleId: string;
-
-  @ManyToOne(() => Role, (role) => role.userRoles)
-  @JoinColumn({ name: 'roleId' })
-  role: Role;
-
-  @Column({ type: 'jsonb', nullable: true })
-  context: Record<string, any>; // Context-specific role data
-
-  @Column({ default: true })
-  isActive: boolean;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-}
-
-// Role-Permission mapping (explicit table for additional metadata)
-@Entity('role_permissions')
-@Index(['roleId', 'permissionId'], { unique: true })
-export class RolePermission {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @Column()
-  roleId: string;
-
-  @Column()
-  permissionId: string;
-
-  @ManyToOne(() => Role)
-  @JoinColumn({ name: 'roleId' })
-  role: Role;
-
-  @ManyToOne(() => Permission)
-  @JoinColumn({ name: 'permissionId' })
-  permission: Permission;
-
-  @Column({ type: 'jsonb', nullable: true })
-  conditions: Record<string, any>; // Conditional permissions
-
-  @Column({ type: 'jsonb', nullable: true })
-  fields: string[]; // Field-level permissions
-
-  @Column({ default: true })
-  isActive: boolean;
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
+    await this.publishJob(`${topic}.dlq`, dlqMessage);
+  }
 }
 ```
 
-#### **RBAC Service with Caching**
+### Interview Questions
+**Technical:**
+1. Compare different message queue systems (RabbitMQ, Kafka, BullMQ).
+2. How do you ensure exactly-once processing in a distributed job system?
+3. Explain dead letter queues and their use cases.
+4. How would you implement job prioritization?
+5. What are the considerations for job retry strategies?
 
-```typescript
-// src/rbac/rbac.service.ts
-import {
-  Injectable,
-  NotFoundException,
-  ConflictException,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, TreeRepository } from 'typeorm';
-import { RedisService } from '../redis/redis.service';
-import {
-  Role,
-  Permission,
-  UserRole,
-  RolePermission,
-  Resource,
-} from './entities';
+**Scenario-based:**
+1. Your job queue is backing up with millions of pending jobs. How would you handle this?
+2. How would you implement a job dependency system (job B runs after job A completes)?
+3. Describe how you would monitor and alert on job queue health.
+4. Jobs are failing due to database connection issues. How would you design a resilient system?
+5. How would you migrate from one job queue system to another without losing jobs?
 
-interface PermissionCheckOptions {
-  userId: string;
-  resource: string;
-  action: string;
-  context?: Record<string, any>;
-}
+---
 
-interface RoleAssignment {
-  userId: string;
-  roleId: string;
-  context?: Record<string, any>;
-}
+## 11. Cloud Storage System <a name="cloud-storage-system"></a>
 
-@Injectable()
-export class RbacService {
-  constructor(
-    @InjectRepository(Role)
-    private readonly roleRepository: Repository<Role>,
-    @InjectRepository(Permission)
-    private readonly permissionRepository: Repository<Permission>,
-    @InjectRepository(UserRole)
-    private readonly userRoleRepository: Repository<UserRole>,
-    @InjectRepository(RolePermission)
-    private readonly rolePermissionRepository: Repository<RolePermission>,
-    @InjectRepository(Resource)
-    private readonly resourceRepository: Repository<Resource>,
-    @InjectRepository(Role)
-    private readonly roleTreeRepository: TreeRepository<Role>,
-    private readonly redisService: RedisService,
-  ) {}
+### Implementation
+```javascript
+// Unified cloud storage service with multi-provider support
+const { S3 } = require('@aws-sdk/client-s3');
+const { CloudFront } = require('@aws-sdk/client-cloudfront');
+const { Storage } = require('@google-cloud/storage');
+const { BlobServiceClient } = require('@azure/storage-blob');
+const fs = require('fs').promises;
+const path = require('path');
 
-  private readonly CACHE_TTL = 3600; // 1 hour
-  private readonly USER_PERMISSIONS_CACHE_KEY = 'user_permissions';
+class CloudStorageService {
+  constructor() {
+    this.providers = {
+      aws: this.setupAWS(),
+      gcp: this.setupGCP(),
+      azure: this.setupAzure(),
+      local: this.setupLocal()
+    };
 
-  // Resource Management
-  async createResource(data: {
-    name: string;
-    description: string;
-  }) {
-    const existingResource = await this.resourceRepository.findOne({
-      where: { name: data.name },
-    });
-
-    if (existingResource) {
-      throw new ConflictException('Resource already exists');
-    }
-
-    const resource = this.resourceRepository.create(data);
-    return this.resourceRepository.save(resource);
+    this.defaultProvider = process.env.STORAGE_PROVIDER || 'aws';
+    this.cdnUrl = process.env.CDN_URL;
+    this.cacheControl = 'public, max-age=31536000';
   }
 
-  async createPermission(data: {
-    name: string;
-    action: string;
-    resourceId: string;
-    description?: string;
-  }) {
-    const resource = await this.resourceRepository.findOne({
-      where: { id: data.resourceId },
-    });
-
-    if (!resource) {
-      throw new NotFoundException('Resource not found');
-    }
-
-    const existingPermission = await this.permissionRepository.findOne({
-      where: {
-        resourceId: data.resourceId,
-        action: data.action,
+  setupAWS() {
+    const s3 = new S3({
+      region: process.env.AWS_REGION,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
       },
+      maxAttempts: 3,
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      responseChecksumValidation: 'WHEN_REQUIRED'
     });
 
-    if (existingPermission) {
-      throw new ConflictException('Permission already exists for this resource');
-    }
-
-    const permission = this.permissionRepository.create({
-      ...data,
-      resource,
-    });
-
-    return this.permissionRepository.save(permission);
-  }
-
-  // Role Management with Hierarchy
-  async createRole(data: {
-    name: string;
-    description: string;
-    parentId?: string;
-    permissionIds?: string[];
-  }) {
-    const existingRole = await this.roleRepository.findOne({
-      where: { name: data.name },
-    });
-
-    if (existingRole) {
-      throw new ConflictException('Role already exists');
-    }
-
-    let parent = null;
-    if (data.parentId) {
-      parent = await this.roleRepository.findOne({
-        where: { id: data.parentId },
-      });
-      if (!parent) {
-        throw new NotFoundException('Parent role not found');
+    const cloudFront = new CloudFront({
+      region: process.env.AWS_REGION,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
       }
-    }
-
-    const role = this.roleRepository.create({
-      name: data.name,
-      description: data.description,
-      parent,
-      level: parent ? parent.level + 1 : 0,
     });
 
-    const savedRole = await this.roleRepository.save(role);
-
-    // Assign permissions if provided
-    if (data.permissionIds && data.permissionIds.length > 0) {
-      await this.assignPermissionsToRole(savedRole.id, data.permissionIds);
-    }
-
-    // Invalidate cache
-    await this.invalidateRoleCache(savedRole.id);
-
-    return savedRole;
+    return { s3, cloudFront };
   }
 
-  async getRoleWithHierarchy(roleId: string): Promise<Role> {
-    const role = await this.roleTreeRepository.findOne({
-      where: { id: roleId },
-      relations: ['parent', 'children'],
+  setupGCP() {
+    const storage = new Storage({
+      projectId: process.env.GCP_PROJECT_ID,
+      keyFilename: process.env.GCP_KEY_FILE,
+      retryOptions: {
+        autoRetry: true,
+        maxRetries: 3
+      }
     });
 
-    if (!role) {
-      throw new NotFoundException('Role not found');
-    }
-
-    return role;
+    return { storage };
   }
 
-  async getRolePermissions(roleId: string, includeInherited = true): Promise<Permission[]> {
-    const cacheKey = `role_permissions:${roleId}:${includeInherited}`;
+  setupAzure() {
+    const blobServiceClient = BlobServiceClient.fromConnectionString(
+      process.env.AZURE_STORAGE_CONNECTION_STRING
+    );
+
+    return { blobServiceClient };
+  }
+
+  setupLocal() {
+    const uploadDir = path.join(__dirname, 'uploads');
     
-    // Try cache first
-    const cached = await this.redisService.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached);
-    }
-
-    const role = await this.getRoleWithHierarchy(roleId);
-    const roleIds = [role.id];
-
-    // Get all parent roles if including inherited
-    if (includeInherited) {
-      let current = role;
-      while (current.parent) {
-        roleIds.push(current.parent.id);
-        current = current.parent;
-      }
-    }
-
-    // Get permissions for all roles
-    const permissions = await this.permissionRepository
-      .createQueryBuilder('permission')
-      .innerJoin('permission.roles', 'role')
-      .where('role.id IN (:...roleIds)', { roleIds })
-      .distinct(true)
-      .getMany();
-
-    // Cache result
-    await this.redisService.setex(
-      cacheKey,
-      this.CACHE_TTL,
-      JSON.stringify(permissions),
-    );
-
-    return permissions;
+    // Ensure upload directory exists
+    fs.mkdir(uploadDir, { recursive: true });
+    
+    return { uploadDir };
   }
 
-  // Permission Assignment
-  async assignPermissionsToRole(roleId: string, permissionIds: string[]) {
-    const role = await this.roleRepository.findOne({
-      where: { id: roleId },
-    });
+  async uploadFile(file, options = {}) {
+    const {
+      provider = this.defaultProvider,
+      folder = 'uploads',
+      isPublic = false,
+      metadata = {},
+      contentType,
+      generateThumbnails = false
+    } = options;
 
-    if (!role) {
-      throw new NotFoundException('Role not found');
-    }
+    // Generate unique filename
+    const fileExt = path.extname(file.originalname);
+    const fileName = `${Date.now()}-${Math.random().toString(36).substr(2)}${fileExt}`;
+    const filePath = `${folder}/${fileName}`;
 
-    const permissions = await this.permissionRepository.find({
-      where: { id: In(permissionIds) },
-    });
-
-    if (permissions.length !== permissionIds.length) {
-      throw new NotFoundException('Some permissions not found');
-    }
-
-    // Remove existing assignments
-    await this.rolePermissionRepository.delete({ roleId });
-
-    // Create new assignments
-    const rolePermissions = permissions.map((permission) =>
-      this.rolePermissionRepository.create({
-        roleId,
-        permissionId: permission.id,
-      }),
-    );
-
-    await this.rolePermissionRepository.save(rolePermissions);
-
-    // Invalidate cache
-    await this.invalidateRoleCache(roleId);
-    await this.invalidateUserPermissionsCacheForRole(roleId);
-  }
-
-  // User Role Assignment
-  async assignRoleToUser(assignment: RoleAssignment) {
-    const { userId, roleId, context } = assignment;
-
-    const role = await this.roleRepository.findOne({
-      where: { id: roleId },
-    });
-
-    if (!role) {
-      throw new NotFoundException('Role not found');
-    }
-
-    const existingAssignment = await this.userRoleRepository.findOne({
-      where: { userId, roleId },
-    });
-
-    if (existingAssignment) {
-      throw new ConflictException('User already has this role');
-    }
-
-    const userRole = this.userRoleRepository.create({
-      userId,
-      roleId,
-      context,
-    });
-
-    await this.userRoleRepository.save(userRole);
-
-    // Invalidate user permissions cache
-    await this.invalidateUserPermissionsCache(userId);
-
-    return userRole;
-  }
-
-  async getUserRoles(userId: string): Promise<Role[]> {
-    const userRoles = await this.userRoleRepository.find({
-      where: { userId, isActive: true },
-      relations: ['role'],
-    });
-
-    return userRoles.map((ur) => ur.role);
-  }
-
-  // Permission Checking
-  async checkPermission(options: PermissionCheckOptions): Promise<boolean> {
-    const { userId, resource, action, context } = options;
-
-    // Get user permissions with caching
-    const userPermissions = await this.getUserPermissions(userId);
-
-    // Find matching permission
-    const permission = userPermissions.find(
-      (p) => p.resource.name === resource && p.action === action,
-    );
-
-    if (!permission) {
-      return false;
-    }
-
-    // Check context conditions if provided
-    if (context) {
-      const rolePermission = await this.rolePermissionRepository.findOne({
-        where: {
-          permissionId: permission.id,
-          role: {
-            userRoles: { userId },
-          },
-        },
-        relations: ['role', 'role.userRoles'],
-      });
-
-      if (rolePermission?.conditions) {
-        return this.evaluateConditions(rolePermission.conditions, context);
-      }
-    }
-
-    return true;
-  }
-
-  async getUserPermissions(userId: string): Promise<Permission[]> {
-    const cacheKey = `${this.USER_PERMISSIONS_CACHE_KEY}:${userId}`;
-
-    // Try cache first
-    const cached = await this.redisService.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached);
-    }
-
-    // Get user roles
-    const userRoles = await this.getUserRoles(userId);
-
-    // Get permissions from all roles (including inherited)
-    const allPermissions = new Map<string, Permission>();
-
-    for (const role of userRoles) {
-      const rolePermissions = await this.getRolePermissions(role.id, true);
+    let uploadResult;
+    
+    switch (provider) {
+      case 'aws':
+        uploadResult = await this.uploadToS3(file.buffer, filePath, {
+          isPublic,
+          metadata,
+          contentType: contentType || file.mimetype
+        });
+        break;
       
-      rolePermissions.forEach((permission) => {
-        if (!allPermissions.has(permission.id)) {
-          allPermissions.set(permission.id, permission);
-        }
-      });
+      case 'gcp':
+        uploadResult = await this.uploadToGCS(file.buffer, filePath, {
+          isPublic,
+          metadata,
+          contentType: contentType || file.mimetype
+        });
+        break;
+      
+      case 'azure':
+        uploadResult = await this.uploadToAzure(file.buffer, filePath, {
+          metadata,
+          contentType: contentType || file.mimetype
+        });
+        break;
+      
+      case 'local':
+        uploadResult = await this.uploadToLocal(file.buffer, filePath);
+        break;
+      
+      default:
+        throw new Error(`Unsupported provider: ${provider}`);
     }
 
-    const permissions = Array.from(allPermissions.values());
-
-    // Cache result
-    await this.redisService.setex(
-      cacheKey,
-      this.CACHE_TTL,
-      JSON.stringify(permissions),
-    );
-
-    return permissions;
-  }
-
-  // Field-level permissions
-  async getFieldPermissions(
-    userId: string,
-    resource: string,
-  ): Promise<Record<string, string[]>> {
-    const userRoles = await this.getUserRoles(userId);
-    const fieldPermissions: Record<string, string[]> = {};
-
-    for (const role of userRoles) {
-      const rolePermissions = await this.rolePermissionRepository
-        .createQueryBuilder('rp')
-        .innerJoinAndSelect('rp.permission', 'permission')
-        .innerJoinAndSelect('permission.resource', 'resource')
-        .where('rp.roleId = :roleId', { roleId: role.id })
-        .andWhere('resource.name = :resource', { resource })
-        .andWhere('rp.fields IS NOT NULL')
-        .getMany();
-
-      rolePermissions.forEach((rp) => {
-        if (rp.fields && rp.fields.length > 0) {
-          const action = rp.permission.action;
-          if (!fieldPermissions[action]) {
-            fieldPermissions[action] = [];
-          }
-          fieldPermissions[action].push(...rp.fields);
-        }
-      });
+    // Generate thumbnails for images
+    if (generateThumbnails && file.mimetype.startsWith('image/')) {
+      const thumbnails = await this.generateThumbnails(
+        file.buffer,
+        filePath,
+        provider
+      );
+      
+      uploadResult.thumbnails = thumbnails;
     }
 
-    // Remove duplicates
-    Object.keys(fieldPermissions).forEach((action) => {
-      fieldPermissions[action] = [...new Set(fieldPermissions[action])];
+    // Store file metadata in database
+    const fileRecord = await File.create({
+      originalName: file.originalname,
+      fileName,
+      filePath,
+      provider,
+      size: file.size,
+      contentType: file.mimetype,
+      isPublic,
+      metadata: {
+        ...metadata,
+        uploaderId: options.userId
+      },
+      url: uploadResult.url,
+      thumbnailUrls: uploadResult.thumbnails
     });
 
-    return fieldPermissions;
+    return {
+      ...uploadResult,
+      id: fileRecord.id,
+      originalName: file.originalname
+    };
   }
 
-  // Utility Methods
-  private async evaluateConditions(
-    conditions: Record<string, any>,
-    context: Record<string, any>,
-  ): Promise<boolean> {
-    // Simple condition evaluation
-    // In production, you might want to use a rules engine
-    for (const [key, value] of Object.entries(conditions)) {
-      if (context[key] !== value) {
-        return false;
+  async uploadToS3(buffer, filePath, options = {}) {
+    const { s3 } = this.providers.aws;
+    
+    const uploadParams = {
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: filePath,
+      Body: buffer,
+      ContentType: options.contentType,
+      Metadata: options.metadata || {},
+      CacheControl: this.cacheControl
+    };
+
+    if (options.isPublic) {
+      uploadParams.ACL = 'public-read';
+    }
+
+    await s3.putObject(uploadParams);
+
+    const url = options.isPublic 
+      ? `https://${process.env.AWS_S3_BUCKET}.s3.amazonaws.com/${filePath}`
+      : await this.generatePresignedUrl(filePath);
+
+    return {
+      provider: 'aws',
+      key: filePath,
+      url,
+      bucket: process.env.AWS_S3_BUCKET
+    };
+  }
+
+  async uploadToGCS(buffer, filePath, options = {}) {
+    const { storage } = this.providers.gcp;
+    const bucket = storage.bucket(process.env.GCS_BUCKET);
+    const file = bucket.file(filePath);
+
+    await file.save(buffer, {
+      metadata: {
+        contentType: options.contentType,
+        metadata: options.metadata,
+        cacheControl: this.cacheControl
+      },
+      public: options.isPublic,
+      validation: 'md5'
+    });
+
+    const url = options.isPublic
+      ? `https://storage.googleapis.com/${process.env.GCS_BUCKET}/${filePath}`
+      : await this.generateSignedUrlGCS(filePath);
+
+    return {
+      provider: 'gcp',
+      key: filePath,
+      url,
+      bucket: process.env.GCS_BUCKET
+    };
+  }
+
+  async uploadToAzure(buffer, filePath, options = {}) {
+    const { blobServiceClient } = this.providers.azure;
+    const containerClient = blobServiceClient.getContainerClient(
+      process.env.AZURE_CONTAINER_NAME
+    );
+    
+    const blockBlobClient = containerClient.getBlockBlobClient(filePath);
+
+    await blockBlobClient.upload(buffer, buffer.length, {
+      blobHTTPHeaders: {
+        blobContentType: options.contentType,
+        blobCacheControl: this.cacheControl
+      },
+      metadata: options.metadata
+    });
+
+    const url = blockBlobClient.url;
+
+    return {
+      provider: 'azure',
+      key: filePath,
+      url,
+      container: process.env.AZURE_CONTAINER_NAME
+    };
+  }
+
+  async uploadToLocal(buffer, filePath) {
+    const { uploadDir } = this.providers.local;
+    const fullPath = path.join(uploadDir, filePath);
+    
+    // Create directory if it doesn't exist
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    
+    await fs.writeFile(fullPath, buffer);
+
+    const url = `${process.env.APP_URL}/uploads/${filePath}`;
+
+    return {
+      provider: 'local',
+      key: filePath,
+      url,
+      path: fullPath
+    };
+  }
+
+  async generatePresignedUrl(filePath, expiresIn = 3600) {
+    const { s3 } = this.providers.aws;
+    
+    const command = new GetObjectCommand({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: filePath
+    });
+
+    return await getSignedUrl(s3, command, { expiresIn });
+  }
+
+  async generateSignedUrlGCS(filePath, expiresIn = 3600) {
+    const { storage } = this.providers.gcp;
+    const bucket = storage.bucket(process.env.GCS_BUCKET);
+    const file = bucket.file(filePath);
+
+    const [url] = await file.getSignedUrl({
+      action: 'read',
+      expires: Date.now() + expiresIn * 1000,
+      version: 'v4'
+    });
+
+    return url;
+  }
+
+  async generateThumbnails(buffer, originalPath, provider) {
+    const thumbnails = {};
+    const sizes = {
+      small: { width: 150, height: 150 },
+      medium: { width: 300, height: 300 },
+      large: { width: 600, height: 600 }
+    };
+
+    for (const [size, dimensions] of Object.entries(sizes)) {
+      const thumbnailBuffer = await sharp(buffer)
+        .resize(dimensions.width, dimensions.height, { fit: 'cover' })
+        .toFormat('webp')
+        .toBuffer();
+
+      const thumbnailPath = originalPath.replace(
+        path.extname(originalPath),
+        `-${size}.webp`
+      );
+
+      let thumbnailUrl;
+      
+      switch (provider) {
+        case 'aws':
+          thumbnailUrl = await this.uploadToS3(thumbnailBuffer, thumbnailPath, {
+            isPublic: true,
+            contentType: 'image/webp'
+          });
+          break;
+        
+        case 'gcp':
+          thumbnailUrl = await this.uploadToGCS(thumbnailBuffer, thumbnailPath, {
+            isPublic: true,
+            contentType: 'image/webp'
+          });
+          break;
+        
+        default:
+          continue;
+      }
+
+      thumbnails[size] = thumbnailUrl.url;
+    }
+
+    return thumbnails;
+  }
+
+  async deleteFile(filePath, provider = this.defaultProvider) {
+    switch (provider) {
+      case 'aws':
+        await this.deleteFromS3(filePath);
+        break;
+      
+      case 'gcp':
+        await this.deleteFromGCS(filePath);
+        break;
+      
+      case 'azure':
+        await this.deleteFromAzure(filePath);
+        break;
+      
+      case 'local':
+        await this.deleteFromLocal(filePath);
+        break;
+    }
+
+    // Also delete from database
+    await File.destroy({ where: { filePath, provider } });
+
+    // Delete thumbnails if they exist
+    const thumbnailPattern = filePath.replace(
+      path.extname(filePath),
+      '-*.webp'
+    );
+
+    await this.deleteMultiple([thumbnailPattern], provider);
+  }
+
+  async deleteMultiple(filePatterns, provider = this.defaultProvider) {
+    const deletePromises = filePatterns.map(pattern =>
+      this.deleteFile(pattern, provider)
+    );
+
+    await Promise.all(deletePromises);
+  }
+
+  async getFileMetadata(filePath, provider = this.defaultProvider) {
+    switch (provider) {
+      case 'aws':
+        return await this.getS3Metadata(filePath);
+      
+      case 'gcp':
+        return await this.getGCSMetadata(filePath);
+      
+      case 'azure':
+        return await this.getAzureMetadata(filePath);
+      
+      default:
+        return null;
+    }
+  }
+
+  async getS3Metadata(filePath) {
+    const { s3 } = this.providers.aws;
+    
+    const response = await s3.headObject({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: filePath
+    });
+
+    return {
+      size: response.ContentLength,
+      contentType: response.ContentType,
+      lastModified: response.LastModified,
+      metadata: response.Metadata,
+      etag: response.ETag
+    };
+  }
+
+  async createCloudFrontInvalidation(filePaths) {
+    const { cloudFront } = this.providers.aws;
+    
+    const invalidation = await cloudFront.createInvalidation({
+      DistributionId: process.env.CLOUDFRONT_DISTRIBUTION_ID,
+      InvalidationBatch: {
+        CallerReference: Date.now().toString(),
+        Paths: {
+          Quantity: filePaths.length,
+          Items: filePaths.map(path => `/${path}`)
+        }
+      }
+    });
+
+    return invalidation;
+  }
+
+  async generateCDNUrl(filePath) {
+    if (!this.cdnUrl) {
+      return this.generatePresignedUrl(filePath);
+    }
+
+    return `${this.cdnUrl}/${filePath}`;
+  }
+
+  async migrateFile(sourcePath, sourceProvider, destPath, destProvider) {
+    // Download from source
+    const fileBuffer = await this.downloadFile(sourcePath, sourceProvider);
+    
+    // Upload to destination
+    const result = await this.uploadFile(
+      { buffer: fileBuffer, originalname: path.basename(sourcePath) },
+      {
+        provider: destProvider,
+        folder: path.dirname(destPath)
+      }
+    );
+    
+    // Delete from source if successful
+    await this.deleteFile(sourcePath, sourceProvider);
+    
+    return result;
+  }
+
+  async downloadFile(filePath, provider = this.defaultProvider) {
+    switch (provider) {
+      case 'aws':
+        return await this.downloadFromS3(filePath);
+      
+      case 'gcp':
+        return await this.downloadFromGCS(filePath);
+      
+      case 'azure':
+        return await this.downloadFromAzure(filePath);
+      
+      case 'local':
+        return await this.downloadFromLocal(filePath);
+      
+      default:
+        throw new Error(`Unsupported provider: ${provider}`);
+    }
+  }
+
+  async downloadFromS3(filePath) {
+    const { s3 } = this.providers.aws;
+    
+    const response = await s3.getObject({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: filePath
+    });
+
+    return await response.Body.transformToByteArray();
+  }
+
+  async syncDirectory(localDir, remotePath, provider = this.defaultProvider) {
+    const files = await fs.readdir(localDir, { withFileTypes: true });
+    
+    for (const file of files) {
+      const localPath = path.join(localDir, file.name);
+      const remoteFilePath = path.join(remotePath, file.name);
+      
+      if (file.isDirectory()) {
+        await this.syncDirectory(localPath, remoteFilePath, provider);
+      } else {
+        const buffer = await fs.readFile(localPath);
+        
+        await this.uploadFile(
+          { buffer, originalname: file.name },
+          {
+            provider,
+            folder: path.dirname(remoteFilePath)
+          }
+        );
       }
     }
-    return true;
   }
 
-  private async invalidateRoleCache(roleId: string): Promise<void> {
-    const pattern = `role_permissions:${roleId}:*`;
-    const keys = await this.redisService.keys(pattern);
-    if (keys.length > 0) {
-      await this.redisService.del(...keys);
+  async getStorageUsage(provider = this.defaultProvider) {
+    switch (provider) {
+      case 'aws':
+        return await this.getS3Usage();
+      
+      case 'gcp':
+        return await this.getGCSUsage();
+      
+      default:
+        return null;
     }
   }
 
-  private async invalidateUserPermissionsCache(userId: string): Promise<void> {
-    const key = `${this.USER_PERMISSIONS_CACHE_KEY}:${userId}`;
-    await this.redisService.del(key);
-  }
-
-  private async invalidateUserPermissionsCacheForRole(roleId: string): Promise<void> {
-    // Get all users with this role
-    const userRoles = await this.userRoleRepository.find({
-      where: { roleId },
-      select: ['userId'],
-    });
-
-    const userIds = userRoles.map((ur) => ur.userId);
+  async getS3Usage() {
+    const { s3 } = this.providers.aws;
     
-    // Invalidate cache for each user
-    await Promise.all(
-      userIds.map((userId) => this.invalidateUserPermissionsCache(userId)),
-    );
+    let totalSize = 0;
+    let totalFiles = 0;
+    let continuationToken;
+    
+    do {
+      const response = await s3.listObjectsV2({
+        Bucket: process.env.AWS_S3_BUCKET,
+        ContinuationToken: continuationToken
+      });
+      
+      totalFiles += response.Contents.length;
+      totalSize += response.Contents.reduce(
+        (sum, obj) => sum + (obj.Size || 0), 0
+      );
+      
+      continuationToken = response.NextContinuationToken;
+    } while (continuationToken);
+    
+    return {
+      totalSize,
+      totalFiles,
+      averageSize: totalFiles > 0 ? totalSize / totalFiles : 0
+    };
+  }
+}
+```
+
+### Interview Questions
+**Technical:**
+1. Compare different cloud storage providers (S3, GCS, Azure Blob).
+2. How do you handle file versioning in cloud storage?
+3. Explain CDN integration and cache invalidation strategies.
+4. How would you implement cross-region replication for disaster recovery?
+5. What are the security considerations for cloud storage?
+
+**Scenario-based:**
+1. Your cloud storage costs are unexpectedly high. How would you optimize them?
+2. How would you implement a file migration from one cloud provider to another?
+3. Describe how you would handle large file uploads (10GB+) to cloud storage.
+4. Files are being accessed without authorization. How would you implement access controls?
+5. How would you design a system that stores files across multiple cloud providers for redundancy?
+
+---
+
+## 12. Multi-tenant Architecture <a name="multi-tenant-architecture"></a>
+
+### Implementation
+```javascript
+// Complete multi-tenant system with database isolation
+class MultiTenantService {
+  constructor() {
+    this.tenantCache = new Map();
+    this.tenantConnections = new Map();
+    this.setupTenantResolver();
   }
 
-  // Bulk permission checking
-  async checkMultiplePermissions(
-    userId: string,
-    checks: Array<{ resource: string; action: string }>,
-  ): Promise<Record<string, boolean>> {
-    const userPermissions = await this.getUserPermissions(userId);
-    const results: Record<string, boolean> = {};
+  setupTenantResolver() {
+    // Middleware to resolve tenant from request
+    this.resolveTenant = async (req, res, next) => {
+      try {
+        // Try to get tenant from subdomain
+        const host = req.headers.host;
+        const subdomain = host.split('.')[0];
+        
+        // Or from header (for API calls)
+        const tenantId = req.headers['x-tenant-id'] || subdomain;
+        
+        if (!tenantId) {
+          return res.status(400).json({ error: 'Tenant not specified' });
+        }
+        
+        // Get tenant from cache or database
+        const tenant = await this.getTenant(tenantId);
+        
+        if (!tenant) {
+          return res.status(404).json({ error: 'Tenant not found' });
+        }
+        
+        // Check if tenant is active
+        if (!tenant.isActive) {
+          return res.status(403).json({ error: 'Tenant is inactive' });
+        }
+        
+        // Set tenant on request
+        req.tenant = tenant;
+        
+        // Set up tenant-specific database connection
+        await this.setupTenantConnection(tenant);
+        
+        next();
+      } catch (error) {
+        res.status(500).json({ error: 'Tenant resolution failed' });
+      }
+    };
+  }
 
-    checks.forEach((check) => {
-      const hasPermission = userPermissions.some(
-        (p) => p.resource.name === check.resource && p.action === check.action,
-      );
-      results[`${check.resource}:${check.action}`] = hasPermission;
+  async getTenant(tenantId) {
+    // Check cache first
+    if (this.tenantCache.has(tenantId)) {
+      return this.tenantCache.get(tenantId);
+    }
+    
+    // Get from database
+    const tenant = await Tenant.findOne({
+      where: {
+        [Op.or]: [
+          { id: tenantId },
+          { subdomain: tenantId },
+          { customDomain: tenantId }
+        ]
+      }
     });
+    
+    if (tenant) {
+      // Cache for 5 minutes
+      this.tenantCache.set(tenantId, tenant);
+      setTimeout(() => {
+        this.tenantCache.delete(tenantId);
+      }, 5 * 60 * 1000);
+    }
+    
+    return tenant;
+  }
 
+  async setupTenantConnection(tenant) {
+    const connectionKey = `tenant_${tenant.id}`;
+    
+    if (this.tenantConnections.has(connectionKey)) {
+      return this.tenantConnections.get(connectionKey);
+    }
+    
+    let connection;
+    
+    switch (tenant.isolationStrategy) {
+      case 'database':
+        connection = await this.createDatabaseConnection(tenant);
+        break;
+      
+      case 'schema':
+        connection = await this.createSchemaConnection(tenant);
+        break;
+      
+      case 'row':
+        connection = await this.createRowLevelConnection(tenant);
+        break;
+      
+      default:
+        throw new Error('Unsupported isolation strategy');
+    }
+    
+    this.tenantConnections.set(connectionKey, connection);
+    return connection;
+  }
+
+  async createDatabaseConnection(tenant) {
+    // Create a separate database for each tenant
+    const sequelize = new Sequelize(
+      `tenant_${tenant.id}`,
+      process.env.DB_USER,
+      process.env.DB_PASSWORD,
+      {
+        host: process.env.DB_HOST,
+        dialect: 'postgres',
+        logging: false,
+        pool: {
+          max: 5,
+          min: 0,
+          acquire: 30000,
+          idle: 10000
+        }
+      }
+    );
+    
+    // Initialize models for this tenant
+    await this.initializeTenantModels(sequelize, tenant);
+    
+    return sequelize;
+  }
+
+  async createSchemaConnection(tenant) {
+    // Use schema isolation (PostgreSQL schemas)
+    const sequelize = new Sequelize(
+      process.env.DB_NAME,
+      process.env.DB_USER,
+      process.env.DB_PASSWORD,
+      {
+        host: process.env.DB_HOST,
+        dialect: 'postgres',
+        logging: false,
+        schema: `tenant_${tenant.id}`,
+        pool: {
+          max: 5,
+          min: 0,
+          acquire: 30000,
+          idle: 10000
+        }
+      }
+    );
+    
+    // Create schema if it doesn't exist
+    await sequelize.createSchema(`tenant_${tenant.id}`, {});
+    
+    // Initialize models in this schema
+    await this.initializeTenantModels(sequelize, tenant);
+    
+    return sequelize;
+  }
+
+  async createRowLevelConnection(tenant) {
+    // Row-level isolation - use the same connection but add tenant ID to queries
+    const sequelize = new Sequelize(
+      process.env.DB_NAME,
+      process.env.DB_USER,
+      process.env.DB_PASSWORD,
+      {
+        host: process.env.DB_HOST,
+        dialect: 'postgres',
+        logging: false,
+        pool: {
+          max: 10,
+          min: 0,
+          acquire: 30000,
+          idle: 10000
+        }
+      }
+    );
+    
+    // Add tenant_id to all queries
+    sequelize.addHook('beforeCreate', (instance) => {
+      if (instance.tenantId === undefined) {
+        instance.tenantId = tenant.id;
+      }
+    });
+    
+    sequelize.addHook('beforeFind', (options) => {
+      options.where = {
+        ...options.where,
+        tenantId: tenant.id
+      };
+    });
+    
+    sequelize.addHook('beforeUpdate', (options) => {
+      options.where = {
+        ...options.where,
+        tenantId: tenant.id
+      };
+    });
+    
+    sequelize.addHook('beforeDestroy', (options) => {
+      options.where = {
+        ...options.where,
+        tenantId: tenant.id
+      };
+    });
+    
+    return sequelize;
+  }
+
+  async initializeTenantModels(sequelize, tenant) {
+    // Define tenant-specific models
+    const User = sequelize.define('User', {
+      id: {
+        type: DataTypes.UUID,
+        defaultValue: DataTypes.UUIDV4,
+        primaryKey: true
+      },
+      email: {
+        type: DataTypes.STRING,
+        allowNull: false,
+        unique: true
+      },
+      // ... other fields
+    });
+    
+    // Add tenant_id for row-level isolation
+    if (tenant.isolationStrategy === 'row') {
+      User.init({
+        tenantId: {
+          type: DataTypes.UUID,
+          allowNull: false
+        }
+      }, { sequelize });
+    }
+    
+    await sequelize.sync();
+  }
+
+  async createTenant(tenantData) {
+    const transaction = await sequelize.transaction();
+    
+    try {
+      // Create tenant record
+      const tenant = await Tenant.create({
+        id: uuid.v4(),
+        name: tenantData.name,
+        subdomain: tenantData.subdomain,
+        customDomain: tenantData.customDomain,
+        isolationStrategy: tenantData.isolationStrategy || 'row',
+        isActive: true,
+        settings: tenantData.settings || {},
+        metadata: tenantData.metadata || {},
+        createdAt: new Date()
+      }, { transaction });
+      
+      // Create tenant database/schema
+      await this.setupTenantConnection(tenant);
+      
+      // Create default admin user
+      await this.createTenantAdmin(tenant, tenantData.admin);
+      
+      // Initialize tenant data
+      await this.initializeTenantData(tenant);
+      
+      await transaction.commit();
+      
+      // Invalidate cache
+      this.tenantCache.delete(tenant.id);
+      this.tenantCache.delete(tenant.subdomain);
+      if (tenant.customDomain) {
+        this.tenantCache.delete(tenant.customDomain);
+      }
+      
+      return tenant;
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
+  }
+
+  async createTenantAdmin(tenant, adminData) {
+    const tenantConnection = await this.setupTenantConnection(tenant);
+    
+    const User = tenantConnection.models.User;
+    
+    const admin = await User.create({
+      email: adminData.email,
+      password: await bcrypt.hash(adminData.password, 12),
+      role: 'admin',
+      isActive: true
+    });
+    
+    return admin;
+  }
+
+  async initializeTenantData(tenant) {
+    const tenantConnection = await this.setupTenantConnection(tenant);
+    
+    // Create default roles
+    const Role = tenantConnection.models.Role;
+    await Role.bulkCreate([
+      { name: 'admin', permissions: ['*'] },
+      { name: 'manager', permissions: ['users:read', 'users:write'] },
+      { name: 'user', permissions: ['profile:read', 'profile:write'] }
+    ]);
+    
+    // Create default settings
+    const Setting = tenantConnection.models.Setting;
+    await Setting.bulkCreate([
+      { key: 'theme', value: 'light' },
+      { key: 'language', value: 'en' },
+      { key: 'timezone', value: 'UTC' }
+    ]);
+  }
+
+  async deleteTenant(tenantId, hardDelete = false) {
+    const tenant = await this.getTenant(tenantId);
+    
+    if (!tenant) {
+      throw new Error('Tenant not found');
+    }
+    
+    if (hardDelete) {
+      // Permanently delete tenant data
+      await this.deleteTenantData(tenant);
+    } else {
+      // Soft delete - mark as inactive
+      await tenant.update({ isActive: false, deletedAt: new Date() });
+    }
+    
+    // Clean up connections
+    const connectionKey = `tenant_${tenant.id}`;
+    if (this.tenantConnections.has(connectionKey)) {
+      const connection = this.tenantConnections.get(connectionKey);
+      await connection.close();
+      this.tenantConnections.delete(connectionKey);
+    }
+    
+    // Clear cache
+    this.tenantCache.delete(tenant.id);
+    this.tenantCache.delete(tenant.subdomain);
+    if (tenant.customDomain) {
+      this.tenantCache.delete(tenant.customDomain);
+    }
+  }
+
+  async deleteTenantData(tenant) {
+    switch (tenant.isolationStrategy) {
+      case 'database':
+        await this.deleteTenantDatabase(tenant);
+        break;
+      
+      case 'schema':
+        await this.deleteTenantSchema(tenant);
+        break;
+      
+      case 'row':
+        await this.deleteTenantRows(tenant);
+        break;
+    }
+    
+    // Delete tenant record
+    await Tenant.destroy({ where: { id: tenant.id } });
+  }
+
+  async deleteTenantDatabase(tenant) {
+    const connection = await this.setupTenantConnection(tenant);
+    await connection.close();
+    
+    // Drop database
+    await sequelize.query(`DROP DATABASE IF EXISTS tenant_${tenant.id}`);
+  }
+
+  async deleteTenantSchema(tenant) {
+    const connection = await this.setupTenantConnection(tenant);
+    
+    // Drop schema
+    await connection.query(`DROP SCHEMA IF EXISTS tenant_${tenant.id} CASCADE`);
+    await connection.close();
+  }
+
+  async deleteTenantRows(tenant) {
+    const connection = await this.setupTenantConnection(tenant);
+    
+    // Delete all tenant data
+    const models = Object.values(connection.models);
+    
+    for (const model of models) {
+      await model.destroy({ where: { tenantId: tenant.id } });
+    }
+    
+    await connection.close();
+  }
+
+  async migrateTenantData(sourceTenant, targetTenant, options = {}) {
+    // Migrate data from one tenant to another
+    const sourceConnection = await this.setupTenantConnection(sourceTenant);
+    const targetConnection = await this.setupTenantConnection(targetTenant);
+    
+    const modelsToMigrate = options.models || ['User', 'Product', 'Order'];
+    
+    for (const modelName of modelsToMigrate) {
+      const SourceModel = sourceConnection.models[modelName];
+      const TargetModel = targetConnection.models[modelName];
+      
+      if (!SourceModel || !TargetModel) continue;
+      
+      const records = await SourceModel.findAll({
+        limit: options.batchSize || 1000
+      });
+      
+      let batch = [];
+      for (const record of records) {
+        const data = record.toJSON();
+        
+        // Remove tenantId if migrating to different tenant
+        if (data.tenantId === sourceTenant.id) {
+          delete data.tenantId;
+        }
+        
+        batch.push(data);
+        
+        if (batch.length >= (options.batchSize || 1000)) {
+          await TargetModel.bulkCreate(batch);
+          batch = [];
+        }
+      }
+      
+      if (batch.length > 0) {
+        await TargetModel.bulkCreate(batch);
+      }
+    }
+  }
+
+  async executeForAllTenants(callback, options = {}) {
+    // Execute a callback for all active tenants
+    const tenants = await Tenant.findAll({
+      where: { isActive: true },
+      limit: options.limit
+    });
+    
+    const results = [];
+    
+    for (const tenant of tenants) {
+      try {
+        const result = await callback(tenant);
+        results.push({
+          tenantId: tenant.id,
+          success: true,
+          result
+        });
+      } catch (error) {
+        results.push({
+          tenantId: tenant.id,
+          success: false,
+          error: error.message
+        });
+      }
+      
+      // Rate limiting
+      if (options.delay) {
+        await new Promise(resolve => setTimeout(resolve, options.delay));
+      }
+    }
+    
     return results;
   }
 
-  // Role-based data filtering
-  async filterDataByRole<T>(
-    userId: string,
-    data: T[],
-    resource: string,
-    action: string,
-  ): Promise<T[]> {
-    const fieldPermissions = await this.getFieldPermissions(userId, resource);
-    const allowedFields = fieldPermissions[action] || [];
-
-    if (allowedFields.length === 0) {
-      // No field restrictions, return all data
-      return data;
-    }
-
-    // Filter data to include only allowed fields
-    return data.map((item) => {
-      const filteredItem = {} as T;
-      allowedFields.forEach((field) => {
-        if (field in item) {
-          filteredItem[field] = item[field];
-        }
-      });
-      return filteredItem;
-    });
-  }
-}
-```
-
-#### **Permission Guards and Decorators**
-
-```typescript
-// src/rbac/guards/permission.guard.ts
-import {
-  Injectable,
-  CanActivate,
-  ExecutionContext,
-  ForbiddenException,
-} from '@nestjs/common';
-import { Reflector } from '@nestjs/core';
-import { RbacService } from '../rbac.service';
-import { Request } from 'express';
-
-interface PermissionMetadata {
-  resource: string;
-  action: string;
-  requireAll?: boolean;
-}
-
-@Injectable()
-export class PermissionGuard implements CanActivate {
-  constructor(
-    private readonly reflector: Reflector,
-    private readonly rbacService: RbacService,
-  ) {}
-
-  async canActivate(context: ExecutionContext): Promise<boolean> {
-    const request = context.switchToHttp().getRequest<Request>();
-    const userId = request.user?.userId;
-
-    if (!userId) {
-      throw new ForbiddenException('User not authenticated');
-    }
-
-    // Get permission metadata from handler or class
-    const handlerPermission = this.reflector.get<PermissionMetadata>(
-      'permission',
-      context.getHandler(),
-    );
-
-    const classPermission = this.reflector.get<PermissionMetadata>(
-      'permission',
-      context.getClass(),
-    );
-
-    const permission = handlerPermission || classPermission;
-
-    if (!permission) {
-      // No permission required
-      return true;
-    }
-
-    // Check permission
-    const hasPermission = await this.rbacService.checkPermission({
-      userId,
-      resource: permission.resource,
-      action: permission.action,
-      context: this.buildContext(request),
-    });
-
-    if (!hasPermission) {
-      throw new ForbiddenException(
-        `Insufficient permissions: ${permission.resource}:${permission.action}`,
-      );
-    }
-
-    return true;
-  }
-
-  private buildContext(request: Request): Record<string, any> {
-    const context: Record<string, any> = {
-      method: request.method,
-      path: request.path,
-      query: request.query,
-      params: request.params,
-      user: request.user,
+  async backupTenant(tenantId) {
+    const tenant = await this.getTenant(tenantId);
+    const connection = await this.setupTenantConnection(tenant);
+    
+    const backup = {
+      tenant: tenant.toJSON(),
+      data: {},
+      timestamp: new Date()
     };
-
-    // Add organization context if available
-    if (request.headers['x-organization-id']) {
-      context.organizationId = request.headers['x-organization-id'];
-    }
-
-    // Add tenant context if available
-    if (request.headers['x-tenant-id']) {
-      context.tenantId = request.headers['x-tenant-id'];
-    }
-
-    return context;
-  }
-}
-
-// src/rbac/decorators/permission.decorator.ts
-import { SetMetadata, CustomDecorator } from '@nestjs/common';
-
-export const PERMISSION_KEY = 'permission';
-
-export const Permission = (
-  resource: string,
-  action: string,
-  requireAll: boolean = true,
-): CustomDecorator => {
-  return SetMetadata(PERMISSION_KEY, { resource, action, requireAll });
-};
-
-// src/rbac/decorators/roles.decorator.ts
-import { SetMetadata, CustomDecorator } from '@nestjs/common';
-
-export const ROLES_KEY = 'roles';
-
-export const Roles = (...roles: string[]): CustomDecorator => {
-  return SetMetadata(ROLES_KEY, roles);
-};
-
-// src/rbac/guards/role.guard.ts
-import {
-  Injectable,
-  CanActivate,
-  ExecutionContext,
-  ForbiddenException,
-} from '@nestjs/common';
-import { Reflector } from '@nestjs/core';
-import { RbacService } from '../rbac.service';
-
-@Injectable()
-export class RoleGuard implements CanActivate {
-  constructor(
-    private readonly reflector: Reflector,
-    private readonly rbacService: RbacService,
-  ) {}
-
-  async canActivate(context: ExecutionContext): Promise<boolean> {
-    const requiredRoles = this.reflector.getAllAndOverride<string[]>(
-      ROLES_KEY,
-      [context.getHandler(), context.getClass()],
-    );
-
-    if (!requiredRoles || requiredRoles.length === 0) {
-      return true;
-    }
-
-    const request = context.switchToHttp().getRequest();
-    const userId = request.user?.userId;
-
-    if (!userId) {
-      throw new ForbiddenException('User not authenticated');
-    }
-
-    // Get user roles
-    const userRoles = await this.rbacService.getUserRoles(userId);
-    const userRoleNames = userRoles.map((role) => role.name);
-
-    // Check if user has any of the required roles
-    const hasRequiredRole = requiredRoles.some((role) =>
-      userRoleNames.includes(role),
-    );
-
-    if (!hasRequiredRole) {
-      throw new ForbiddenException(
-        `Required roles: ${requiredRoles.join(', ')}`,
-      );
-    }
-
-    return true;
-  }
-}
-```
-
-#### **Usage Example in Controller**
-
-```typescript
-// src/users/users.controller.ts
-import {
-  Controller,
-  Get,
-  Post,
-  Put,
-  Delete,
-  Body,
-  Param,
-  Query,
-  UseGuards,
-} from '@nestjs/common';
-import { UsersService } from './users.service';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { PermissionGuard } from '../rbac/guards/permission.guard';
-import { RoleGuard } from '../rbac/guards/role.guard';
-import { Permission } from '../rbac/decorators/permission.decorator';
-import { Roles } from '../rbac/decorators/roles.decorator';
-import { CreateUserDto, UpdateUserDto } from './dto';
-
-@Controller('users')
-@UseGuards(JwtAuthGuard, PermissionGuard, RoleGuard)
-export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
-
-  @Get()
-  @Permission('user', 'read')
-  @Roles('admin', 'manager')
-  async findAll(@Query() query: any) {
-    return this.usersService.findAll(query);
-  }
-
-  @Get(':id')
-  @Permission('user', 'read')
-  @Roles('admin', 'manager', 'user')
-  async findOne(@Param('id') id: string) {
-    return this.usersService.findOne(id);
-  }
-
-  @Post()
-  @Permission('user', 'create')
-  @Roles('admin')
-  async create(@Body() createUserDto: CreateUserDto) {
-    return this.usersService.create(createUserDto);
-  }
-
-  @Put(':id')
-  @Permission('user', 'update')
-  @Roles('admin', 'manager')
-  async update(
-    @Param('id') id: string,
-    @Body() updateUserDto: UpdateUserDto,
-  ) {
-    return this.usersService.update(id, updateUserDto);
-  }
-
-  @Delete(':id')
-  @Permission('user', 'delete')
-  @Roles('admin')
-  async remove(@Param('id') id: string) {
-    return this.usersService.remove(id);
-  }
-
-  // Field-level permissions example
-  @Get(':id/sensitive')
-  @Permission('user', 'read_sensitive')
-  @Roles('admin', 'hr')
-  async getSensitiveInfo(@Param('id') id: string) {
-    const user = await this.usersService.findOne(id);
     
-    // The service can apply field-level filtering based on permissions
-    return this.usersService.filterSensitiveData(user);
-  }
-}
-```
-
-### 🎯 Real-World Scenario: Healthcare System RBAC
-*You're building an EHR (Electronic Health Record) system with strict HIPAA compliance. Different roles (doctor, nurse, receptionist, patient) need different access levels to patient records, with context-based permissions and audit trails.*
-
-**Interview Questions:**
-1. How would you design RBAC for HIPAA compliance?
-2. What strategies would you implement for emergency access override?
-3. How do you handle patient consent for data sharing?
-4. What audit logging is required for healthcare systems?
-5. How would you implement time-based role assignments (temporary access)?
-
-**Technical Questions:**
-1. What's the difference between RBAC and ABAC (Attribute-Based Access Control)?
-2. How do you handle permission inheritance in role hierarchies?
-3. What are the performance implications of fine-grained permissions?
-4. How do you implement row-level security in databases?
-
----
-
-## 3. CRUD with PostgreSQL & MongoDB
-
-### 📖 In-Depth Explanation
-
-Implementing robust CRUD operations with validation, transactions, and optimization for both SQL (PostgreSQL) and NoSQL (MongoDB) databases.
-
-#### **PostgreSQL CRUD with TypeORM**
-
-```typescript
-// src/products/entities/product.entity.ts
-import {
-  Entity,
-  Column,
-  PrimaryGeneratedColumn,
-  CreateDateColumn,
-  UpdateDateColumn,
-  DeleteDateColumn,
-  ManyToOne,
-  OneToMany,
-  ManyToMany,
-  JoinTable,
-  Index,
-  Check,
-  BeforeInsert,
-  BeforeUpdate,
-  AfterLoad,
-} from 'typeorm';
-import { Category } from './category.entity';
-import { Tag } from './tag.entity';
-import { Review } from './review.entity';
-import { Inventory } from './inventory.entity';
-
-export enum ProductStatus {
-  DRAFT = 'draft',
-  ACTIVE = 'active',
-  INACTIVE = 'inactive',
-  ARCHIVED = 'archived',
-}
-
-export enum ProductType {
-  PHYSICAL = 'physical',
-  DIGITAL = 'digital',
-  SERVICE = 'service',
-}
-
-@Entity('products')
-@Index(['sku'], { unique: true })
-@Index(['categoryId', 'status'])
-@Index(['price', 'status'])
-@Check(`"price" >= 0`)
-@Check(`"stock_quantity" >= 0`)
-export class Product {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @Column({ length: 100 })
-  name: string;
-
-  @Column({ length: 500, nullable: true })
-  description: string;
-
-  @Column({ unique: true, length: 50 })
-  sku: string;
-
-  @Column('decimal', { precision: 10, scale: 2 })
-  price: number;
-
-  @Column('decimal', { precision: 10, scale: 2, nullable: true })
-  compareAtPrice: number;
-
-  @Column('decimal', { precision: 5, scale: 2, default: 0 })
-  costPrice: number;
-
-  @Column({ default: 0 })
-  stockQuantity: number;
-
-  @Column({ default: 0 })
-  lowStockThreshold: number;
-
-  @Column({
-    type: 'enum',
-    enum: ProductStatus,
-    default: ProductStatus.DRAFT,
-  })
-  status: ProductStatus;
-
-  @Column({
-    type: 'enum',
-    enum: ProductType,
-    default: ProductType.PHYSICAL,
-  })
-  type: ProductType;
-
-  @Column('simple-array', { nullable: true })
-  images: string[];
-
-  @Column('jsonb', { nullable: true })
-  attributes: Record<string, any>;
-
-  @Column('jsonb', { nullable: true })
-  metadata: Record<string, any>;
-
-  @Column({ default: 0 })
-  viewCount: number;
-
-  @Column({ default: 0 })
-  purchaseCount: number;
-
-  @Column('decimal', { precision: 3, scale: 2, nullable: true })
-  averageRating: number;
-
-  @Column({ nullable: true })
-  categoryId: string;
-
-  @ManyToOne(() => Category, (category) => category.products, {
-    onDelete: 'SET NULL',
-  })
-  category: Category;
-
-  @OneToMany(() => Review, (review) => review.product)
-  reviews: Review[];
-
-  @OneToMany(() => Inventory, (inventory) => inventory.product)
-  inventory: Inventory[];
-
-  @ManyToMany(() => Tag, (tag) => tag.products)
-  @JoinTable({
-    name: 'product_tags',
-    joinColumn: { name: 'productId', referencedColumnName: 'id' },
-    inverseJoinColumn: { name: 'tagId', referencedColumnName: 'id' },
-  })
-  tags: Tag[];
-
-  @CreateDateColumn()
-  createdAt: Date;
-
-  @UpdateDateColumn()
-  updatedAt: Date;
-
-  @DeleteDateColumn()
-  deletedAt: Date;
-
-  // Virtual properties
-  isOnSale: boolean;
-  isLowStock: boolean;
-  discountPercentage: number;
-
-  // Lifecycle hooks
-  @BeforeInsert()
-  @BeforeUpdate()
-  validateProduct() {
-    if (this.price < 0) {
-      throw new Error('Price cannot be negative');
-    }
-
-    if (this.compareAtPrice && this.compareAtPrice < this.price) {
-      throw new Error('Compare at price cannot be less than price');
-    }
-
-    // Generate SKU if not provided
-    if (!this.sku) {
-      this.sku = this.generateSKU();
-    }
-  }
-
-  @AfterLoad()
-  computeVirtualProperties() {
-    this.isOnSale = this.compareAtPrice
-      ? this.compareAtPrice > this.price
-      : false;
-
-    this.isLowStock = this.stockQuantity <= this.lowStockThreshold;
-
-    if (this.compareAtPrice && this.compareAtPrice > 0) {
-      this.discountPercentage = Number(
-        (
-          ((this.compareAtPrice - this.price) / this.compareAtPrice) *
-          100
-        ).toFixed(2),
-      );
-    } else {
-      this.discountPercentage = 0;
-    }
-  }
-
-  private generateSKU(): string {
-    const prefix = 'PROD';
-    const timestamp = Date.now().toString(36);
-    const random = Math.random().toString(36).substr(2, 6);
-    return `${prefix}-${timestamp}-${random}`.toUpperCase();
-  }
-
-  // Business logic methods
-  canPurchase(quantity: number): boolean {
-    return (
-      this.status === ProductStatus.ACTIVE &&
-      this.stockQuantity >= quantity &&
-      quantity > 0
-    );
-  }
-
-  updateStock(quantity: number, type: 'add' | 'subtract'): void {
-    if (type === 'add') {
-      this.stockQuantity += quantity;
-    } else {
-      if (this.stockQuantity < quantity) {
-        throw new Error('Insufficient stock');
-      }
-      this.stockQuantity -= quantity;
-    }
-  }
-
-  updateRating(newRating: number): void {
-    const totalReviews = this.reviews?.length || 0;
-    const currentTotal = this.averageRating * totalReviews;
-    this.averageRating = (currentTotal + newRating) / (totalReviews + 1);
-  }
-}
-```
-
-#### **PostgreSQL Service with Transactions**
-
-```typescript
-// src/products/products.service.ts
-import {
-  Injectable,
-  NotFoundException,
-  ConflictException,
-  BadRequestException,
-  InternalServerErrorException,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import {
-  Repository,
-  DataSource,
-  QueryRunner,
-  SelectQueryBuilder,
-  FindOptionsWhere,
-  In,
-  Between,
-  Like,
-  ILike,
-} from 'typeorm';
-import { Product, ProductStatus, ProductType } from './entities/product.entity';
-import { Category } from './entities/category.entity';
-import { Tag } from './entities/tag.entity';
-import {
-  CreateProductDto,
-  UpdateProductDto,
-  ProductQueryDto,
-  BulkUpdateProductDto,
-} from './dto';
-
-interface ProductSearchResult {
-  data: Product[];
-  total: number;
-  page: number;
-  limit: number;
-  totalPages: number;
-  hasNext: boolean;
-  hasPrevious: boolean;
-}
-
-@Injectable()
-export class ProductsService {
-  constructor(
-    @InjectRepository(Product)
-    private readonly productRepository: Repository<Product>,
-    @InjectRepository(Category)
-    private readonly categoryRepository: Repository<Category>,
-    @InjectRepository(Tag)
-    private readonly tagRepository: Repository<Tag>,
-    private readonly dataSource: DataSource,
-  ) {}
-
-  // Create with transaction
-  async create(createProductDto: CreateProductDto): Promise<Product> {
-    const queryRunner = this.dataSource.createQueryRunner();
+    // Backup all models
+    const models = Object.values(connection.models);
     
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
+    for (const model of models) {
+      const records = await model.findAll();
+      backup.data[model.name] = records.map(record => record.toJSON());
+    }
+    
+    // Store backup in cloud storage
+    const backupKey = `backups/tenant_${tenant.id}/${Date.now()}.json`;
+    await cloudStorageService.uploadFile(
+      { buffer: Buffer.from(JSON.stringify(backup)), originalname: 'backup.json' },
+      { folder: `tenant-backups/${tenant.id}` }
+    );
+    
+    return backupKey;
+  }
 
-    try {
-      // Check for duplicate SKU
-      const existingProduct = await queryRunner.manager.findOne(Product, {
-        where: { sku: createProductDto.sku },
-      });
-
-      if (existingProduct) {
-        throw new ConflictException('Product with this SKU already exists');
-      }
-
-      // Find or create category
-      let category: Category | null = null;
-      if (createProductDto.categoryId) {
-        category = await queryRunner.manager.findOne(Category, {
-          where: { id: createProductDto.categoryId },
-        });
-
-        if (!category) {
-          throw new NotFoundException('Category not found');
-        }
-      } else if (createProductDto.categoryName) {
-        category = await queryRunner.manager.findOne(Category, {
-          where: { name: createProductDto.categoryName },
-        });
-
-        if (!category) {
-          category = queryRunner.manager.create(Category, {
-            name: createProductDto.categoryName,
-            description: createProductDto.categoryDescription,
-          });
-          await queryRunner.manager.save(category);
-        }
-      }
-
-      // Handle tags
-      let tags: Tag[] = [];
-      if (createProductDto.tagIds && createProductDto.tagIds.length > 0) {
-        tags = await queryRunner.manager.find(Tag, {
-          where: { id: In(createProductDto.tagIds) },
-        });
-
-        if (tags.length !== createProductDto.tagIds.length) {
-          throw new NotFoundException('Some tags not found');
-        }
-      } else if (createProductDto.tagNames) {
-        const tagPromises = createProductDto.tagNames.map(async (tagName) => {
-          let tag = await queryRunner.manager.findOne(Tag, {
-            where: { name: tagName },
-          });
-
-          if (!tag) {
-            tag = queryRunner.manager.create(Tag, { name: tagName });
-            await queryRunner.manager.save(tag);
-          }
-
-          return tag;
-        });
-
-        tags = await Promise.all(tagPromises);
-      }
-
-      // Create product
-      const product = queryRunner.manager.create(Product, {
-        ...createProductDto,
-        category,
-        tags,
-      });
-
-      const savedProduct = await queryRunner.manager.save(product);
-
-      await queryRunner.commitTransaction();
-
-      // Return with relations
-      return this.productRepository.findOne({
-        where: { id: savedProduct.id },
-        relations: ['category', 'tags'],
-      });
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
+  async restoreTenant(tenantId, backupKey) {
+    const tenant = await this.getTenant(tenantId);
+    const connection = await this.setupTenantConnection(tenant);
+    
+    // Download backup
+    const backupBuffer = await cloudStorageService.downloadFile(backupKey);
+    const backup = JSON.parse(backupBuffer.toString());
+    
+    // Restore data
+    for (const [modelName, records] of Object.entries(backup.data)) {
+      const Model = connection.models[modelName];
       
-      if (
-        error instanceof ConflictException ||
-        error instanceof NotFoundException ||
-        error instanceof BadRequestException
-      ) {
-        throw error;
-      }
-      
-      throw new InternalServerErrorException('Failed to create product');
-    } finally {
-      await queryRunner.release();
-    }
-  }
-
-  // Advanced search with filtering, sorting, and pagination
-  async findAll(queryDto: ProductQueryDto): Promise<ProductSearchResult> {
-    const {
-      page = 1,
-      limit = 20,
-      sortBy = 'createdAt',
-      sortOrder = 'DESC',
-      search,
-      status,
-      type,
-      categoryId,
-      minPrice,
-      maxPrice,
-      tags,
-      inStock,
-      onSale,
-    } = queryDto;
-
-    const skip = (page - 1) * limit;
-
-    // Build query
-    const queryBuilder = this.productRepository
-      .createQueryBuilder('product')
-      .leftJoinAndSelect('product.category', 'category')
-      .leftJoinAndSelect('product.tags', 'tags')
-      .where('product.deletedAt IS NULL');
-
-    // Apply filters
-    this.applyFilters(queryBuilder, {
-      search,
-      status,
-      type,
-      categoryId,
-      minPrice,
-      maxPrice,
-      tags,
-      inStock,
-      onSale,
-    });
-
-    // Get total count before pagination
-    const total = await queryBuilder.getCount();
-
-    // Apply sorting
-    if (sortBy === 'price') {
-      queryBuilder.orderBy('product.price', sortOrder);
-    } else if (sortBy === 'name') {
-      queryBuilder.orderBy('product.name', sortOrder);
-    } else if (sortBy === 'rating') {
-      queryBuilder.orderBy('product.averageRating', sortOrder);
-    } else {
-      queryBuilder.orderBy(`product.${sortBy}`, sortOrder);
-    }
-
-    // Apply pagination
-    queryBuilder.skip(skip).take(limit);
-
-    // Execute query
-    const data = await queryBuilder.getMany();
-
-    // Calculate pagination metadata
-    const totalPages = Math.ceil(total / limit);
-    const hasNext = page < totalPages;
-    const hasPrevious = page > 1;
-
-    return {
-      data,
-      total,
-      page: Number(page),
-      limit: Number(limit),
-      totalPages,
-      hasNext,
-      hasPrevious,
-    };
-  }
-
-  private applyFilters(
-    queryBuilder: SelectQueryBuilder<Product>,
-    filters: {
-      search?: string;
-      status?: ProductStatus;
-      type?: ProductType;
-      categoryId?: string;
-      minPrice?: number;
-      maxPrice?: number;
-      tags?: string[];
-      inStock?: boolean;
-      onSale?: boolean;
-    },
-  ) {
-    const {
-      search,
-      status,
-      type,
-      categoryId,
-      minPrice,
-      maxPrice,
-      tags,
-      inStock,
-      onSale,
-    } = filters;
-
-    if (search) {
-      queryBuilder.andWhere(
-        '(product.name ILIKE :search OR product.description ILIKE :search OR product.sku ILIKE :search)',
-        { search: `%${search}%` },
-      );
-    }
-
-    if (status) {
-      queryBuilder.andWhere('product.status = :status', { status });
-    }
-
-    if (type) {
-      queryBuilder.andWhere('product.type = :type', { type });
-    }
-
-    if (categoryId) {
-      queryBuilder.andWhere('product.categoryId = :categoryId', { categoryId });
-    }
-
-    if (minPrice !== undefined) {
-      queryBuilder.andWhere('product.price >= :minPrice', { minPrice });
-    }
-
-    if (maxPrice !== undefined) {
-      queryBuilder.andWhere('product.price <= :maxPrice', { maxPrice });
-    }
-
-    if (tags && tags.length > 0) {
-      queryBuilder
-        .innerJoin('product.tags', 'filterTags')
-        .andWhere('filterTags.id IN (:...tags)', { tags });
-    }
-
-    if (inStock !== undefined) {
-      if (inStock) {
-        queryBuilder.andWhere('product.stockQuantity > 0');
-      } else {
-        queryBuilder.andWhere('product.stockQuantity = 0');
+      if (Model) {
+        // Clear existing data
+        await Model.destroy({ where: {} });
+        
+        // Restore records
+        if (records.length > 0) {
+          await Model.bulkCreate(records);
+        }
       }
     }
-
-    if (onSale !== undefined) {
-      if (onSale) {
-        queryBuilder.andWhere('product.compareAtPrice IS NOT NULL');
-        queryBuilder.andWhere('product.compareAtPrice > product.price');
-      }
-    }
-  }
-
-  // Find by ID with caching
-  async findOne(id: string): Promise<Product> {
-    const product = await this.productRepository.findOne({
-      where: { id, deletedAt: null },
-      relations: ['category', 'tags', 'reviews', 'inventory'],
-    });
-
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
-
-    // Increment view count (fire and forget)
-    this.incrementViewCount(id).catch(console.error);
-
-    return product;
-  }
-
-  // Update with optimistic locking
-  async update(
-    id: string,
-    updateProductDto: UpdateProductDto,
-  ): Promise<Product> {
-    const queryRunner = this.dataSource.createQueryRunner();
     
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
-
-    try {
-      // Lock the row for update
-      const product = await queryRunner.manager.findOne(Product, {
-        where: { id, deletedAt: null },
-        lock: { mode: 'pessimistic_write' },
-      });
-
-      if (!product) {
-        throw new NotFoundException('Product not found');
-      }
-
-      // Check version if using optimistic locking
-      if (updateProductDto.version && product.version !== updateProductDto.version) {
-        throw new ConflictException('Product has been modified by another user');
-      }
-
-      // Update fields
-      Object.assign(product, updateProductDto);
-
-      // Handle category update if provided
-      if (updateProductDto.categoryId) {
-        const category = await queryRunner.manager.findOne(Category, {
-          where: { id: updateProductDto.categoryId },
-        });
-
-        if (!category) {
-          throw new NotFoundException('Category not found');
-        }
-
-        product.category = category;
-      }
-
-      // Handle tags update if provided
-      if (updateProductDto.tagIds) {
-        const tags = await queryRunner.manager.find(Tag, {
-          where: { id: In(updateProductDto.tagIds) },
-        });
-
-        if (tags.length !== updateProductDto.tagIds.length) {
-          throw new NotFoundException('Some tags not found');
-        }
-
-        product.tags = tags;
-      }
-
-      // Save updated product
-      const updatedProduct = await queryRunner.manager.save(product);
-
-      await queryRunner.commitTransaction();
-
-      return this.productRepository.findOne({
-        where: { id: updatedProduct.id },
-        relations: ['category', 'tags'],
-      });
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw error;
-    } finally {
-      await queryRunner.release();
+    // Update tenant settings
+    if (backup.tenant.settings) {
+      await tenant.update({ settings: backup.tenant.settings });
     }
-  }
-
-  // Soft delete with cascade
-  async remove(id: string): Promise<void> {
-    const product = await this.productRepository.findOne({
-      where: { id, deletedAt: null },
-    });
-
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
-
-    // Check if product can be deleted (e.g., has orders)
-    const hasOrders = await this.checkProductHasOrders(id);
-    if (hasOrders) {
-      throw new BadRequestException(
-        'Cannot delete product with existing orders',
-      );
-    }
-
-    // Soft delete
-    await this.productRepository.softDelete(id);
-  }
-
-  // Bulk operations
-  async bulkUpdate(
-    bulkUpdateDto: BulkUpdateProductDto,
-  ): Promise<{ updated: number; failed: number }> {
-    const { productIds, updates } = bulkUpdateDto;
-    
-    const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
-
-    let updated = 0;
-    const failed: Array<{ id: string; error: string }> = [];
-
-    try {
-      for (const productId of productIds) {
-        try {
-          const product = await queryRunner.manager.findOne(Product, {
-            where: { id: productId, deletedAt: null },
-          });
-
-          if (!product) {
-            failed.push({ id: productId, error: 'Product not found' });
-            continue;
-          }
-
-          // Apply updates
-          Object.assign(product, updates);
-          await queryRunner.manager.save(product);
-          updated++;
-        } catch (error) {
-          failed.push({ id: productId, error: error.message });
-        }
-      }
-
-      await queryRunner.commitTransaction();
-      return { updated, failed: failed.length };
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
-  }
-
-  // Stock management
-  async updateStock(
-    productId: string,
-    quantity: number,
-    action: 'add' | 'subtract',
-    reason?: string,
-  ): Promise<Product> {
-    const queryRunner = this.dataSource.createQueryRunner();
-    
-    await queryRunner.connect();
-    await queryRunner.startTransaction();
-
-    try {
-      const product = await queryRunner.manager.findOne(Product, {
-        where: { id: productId, deletedAt: null },
-        lock: { mode: 'pessimistic_write' },
-      });
-
-      if (!product) {
-        throw new NotFoundException('Product not found');
-      }
-
-      // Update stock
-      if (action === 'add') {
-        product.stockQuantity += quantity;
-      } else {
-        if (product.stockQuantity < quantity) {
-          throw new BadRequestException('Insufficient stock');
-        }
-        product.stockQuantity -= quantity;
-      }
-
-      // Create inventory record
-      const inventory = queryRunner.manager.create(Inventory, {
-        productId,
-        quantity: action === 'add' ? quantity : -quantity,
-        type: action === 'add' ? 'restock' : 'sale',
-        reason,
-        previousQuantity: product.stockQuantity - (action === 'add' ? quantity : -quantity),
-        newQuantity: product.stockQuantity,
-      });
-
-      await queryRunner.manager.save([product, inventory]);
-      await queryRunner.commitTransaction();
-
-      return product;
-    } catch (error) {
-      await queryRunner.rollbackTransaction();
-      throw error;
-    } finally {
-      await queryRunner.release();
-    }
-  }
-
-  // Analytics and reporting
-  async getProductAnalytics(timeRange: 'day' | 'week' | 'month' | 'year') {
-    const date = new Date();
-    let startDate: Date;
-
-    switch (timeRange) {
-      case 'day':
-        startDate = new Date(date.setDate(date.getDate() - 1));
-        break;
-      case 'week':
-        startDate = new Date(date.setDate(date.getDate() - 7));
-        break;
-      case 'month':
-        startDate = new Date(date.setMonth(date.getMonth() - 1));
-        break;
-      case 'year':
-        startDate = new Date(date.setFullYear(date.getFullYear() - 1));
-        break;
-      default:
-        startDate = new Date(date.setDate(date.getDate() - 7));
-    }
-
-    return this.productRepository
-      .createQueryBuilder('product')
-      .select([
-        'product.id',
-        'product.name',
-        'product.sku',
-        'COUNT(reviews.id) as reviewCount',
-        'AVG(reviews.rating) as averageRating',
-        'SUM(CASE WHEN inventory.type = :sale THEN -inventory.quantity ELSE 0 END) as unitsSold',
-        'SUM(CASE WHEN inventory.type = :sale THEN product.price * -inventory.quantity ELSE 0 END) as revenue',
-      ])
-      .leftJoin('product.reviews', 'reviews')
-      .leftJoin('product.inventory', 'inventory', 'inventory.createdAt >= :startDate', {
-        startDate,
-      })
-      .where('product.deletedAt IS NULL')
-      .andWhere('product.status = :status', { status: ProductStatus.ACTIVE })
-      .setParameter('sale', 'sale')
-      .groupBy('product.id')
-      .orderBy('revenue', 'DESC')
-      .limit(10)
-      .getRawMany();
-  }
-
-  // Utility methods
-  private async incrementViewCount(productId: string): Promise<void> {
-    await this.productRepository.increment(
-      { id: productId },
-      'viewCount',
-      1,
-    );
-  }
-
-  private async checkProductHasOrders(productId: string): Promise<boolean> {
-    // Implementation depends on your order system
-    // This is a placeholder
-    return false;
-  }
-
-  // Search with full-text search (PostgreSQL tsvector)
-  async searchFullText(query: string): Promise<Product[]> {
-    return this.productRepository
-      .createQueryBuilder('product')
-      .where(
-        `to_tsvector('english', coalesce(product.name, '') || ' ' || coalesce(product.description, '')) @@ to_tsquery(:query)`,
-        { query: `${query.replace(/\s+/g, ' & ')}:*` },
-      )
-      .andWhere('product.deletedAt IS NULL')
-      .andWhere('product.status = :status', { status: ProductStatus.ACTIVE })
-      .orderBy(
-        `ts_rank(to_tsvector('english', coalesce(product.name, '') || ' ' || coalesce(product.description, '')), to_tsquery(:query))`,
-        'DESC',
-      )
-      .limit(50)
-      .getMany();
   }
 }
-```
 
-#### **MongoDB CRUD with Mongoose**
+// Usage in Express app
+const multiTenantService = new MultiTenantService();
 
-```typescript
-// src/orders/schemas/order.schema.ts
-import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document, Types, Schema as MongooseSchema } from 'mongoose';
-import { User } from '../../users/schemas/user.schema';
-import { Product } from '../../products/schemas/product.schema';
+app.use(multiTenantService.resolveTenant);
 
-export enum OrderStatus {
-  PENDING = 'pending',
-  CONFIRMED = 'confirmed',
-  PROCESSING = 'processing',
-  SHIPPED = 'shipped',
-  DELIVERED = 'delivered',
-  CANCELLED = 'cancelled',
-  REFUNDED = 'refunded',
-}
-
-export enum PaymentStatus {
-  PENDING = 'pending',
-  PAID = 'paid',
-  FAILED = 'failed',
-  REFUNDED = 'refunded',
-}
-
-export enum PaymentMethod {
-  CREDIT_CARD = 'credit_card',
-  DEBIT_CARD = 'debit_card',
-  PAYPAL = 'paypal',
-  BANK_TRANSFER = 'bank_transfer',
-  CASH_ON_DELIVERY = 'cash_on_delivery',
-}
-
-@Schema({
-  timestamps: true,
-  toJSON: {
-    virtuals: true,
-    transform: (doc, ret) => {
-      ret.id = ret._id;
-      delete ret._id;
-      delete ret.__v;
-      return ret;
-    },
-  },
-})
-export class Order extends Document {
-  @Prop({ required: true, unique: true, index: true })
-  orderNumber: string;
-
-  @Prop({ type: Types.ObjectId, ref: 'User', required: true, index: true })
-  userId: Types.ObjectId;
-
-  @Prop({ type: Types.ObjectId, ref: 'User' })
-  customer?: User;
-
-  @Prop([
-    {
-      productId: { type: Types.ObjectId, ref: 'Product', required: true },
-      name: { type: String, required: true },
-      sku: { type: String, required: true },
-      price: { type: Number, required: true, min: 0 },
-      quantity: { type: Number, required: true, min: 1 },
-      subtotal: { type: Number, required: true },
-      attributes: { type: MongooseSchema.Types.Mixed },
-    },
-  ])
-  items: Array<{
-    productId: Types.ObjectId;
-    name: string;
-    sku: string;
-    price: number;
-    quantity: number;
-    subtotal: number;
-    attributes?: Record<string, any>;
-  }>;
-
-  @Prop({
-    type: String,
-    enum: OrderStatus,
-    default: OrderStatus.PENDING,
-    index: true,
-  })
-  status: OrderStatus;
-
-  @Prop({
-    type: String,
-    enum: PaymentStatus,
-    default: PaymentStatus.PENDING,
-    index: true,
-  })
-  paymentStatus: PaymentStatus;
-
-  @Prop({
-    type: String,
-    enum: PaymentMethod,
-    required: true,
-  })
-  paymentMethod: PaymentMethod;
-
-  @Prop()
-  paymentId?: string;
-
-  @Prop({ type: MongooseSchema.Types.Mixed })
-  paymentDetails?: Record<string, any>;
-
-  @Prop({ required: true, min: 0 })
-  subtotal: number;
-
-  @Prop({ default: 0, min: 0 })
-  taxAmount: number;
-
-  @Prop({ default: 0, min: 0 })
-  shippingAmount: number;
-
-  @Prop({ default: 0, min: 0 })
-  discountAmount: number;
-
-  @Prop({ required: true, min: 0 })
-  total: number;
-
-  @Prop({
-    shippingAddress: {
-      street: { type: String, required: true },
-      city: { type: String, required: true },
-      state: { type: String, required: true },
-      country: { type: String, required: true },
-      zipCode: { type: String, required: true },
-      phone: { type: String },
-    },
-    billingAddress: {
-      street: { type: String, required: true },
-      city: { type: String, required: true },
-      state: { type: String, required: true },
-      country: { type: String, required: true },
-      zipCode: { type: String, required: true },
-    },
-  })
-  address: {
-    shippingAddress: {
-      street: string;
-      city: string;
-      state: string;
-      country: string;
-      zipCode: string;
-      phone?: string;
-    };
-    billingAddress: {
-      street: string;
-      city: string;
-      state: string;
-      country: string;
-      zipCode: string;
-    };
-  };
-
-  @Prop()
-  notes?: string;
-
-  @Prop()
-  trackingNumber?: string;
-
-  @Prop()
-  estimatedDelivery?: Date;
-
-  @Prop()
-  deliveredAt?: Date;
-
-  @Prop()
-  cancelledAt?: Date;
-
-  @Prop()
-  cancelledReason?: string;
-
-  @Prop({ type: MongooseSchema.Types.Mixed })
-  metadata?: Record<string, any>;
-
-  // Virtuals
-  itemCount?: number;
-  isDelivered?: boolean;
-  isCancelled?: boolean;
-  daysSinceCreated?: number;
-
-  // Methods
-  calculateTotals(): void;
-  canBeCancelled(): boolean;
-  updateStatus(newStatus: OrderStatus): void;
-}
-
-export const OrderSchema = SchemaFactory.createForClass(Order);
-
-// Virtuals
-OrderSchema.virtual('itemCount').get(function () {
-  return this.items.reduce((sum, item) => sum + item.quantity, 0);
+app.get('/api/users', async (req, res) => {
+  // Get tenant-specific connection
+  const tenantConnection = await multiTenantService.setupTenantConnection(req.tenant);
+  const User = tenantConnection.models.User;
+  
+  const users = await User.findAll();
+  res.json(users);
 });
 
-OrderSchema.virtual('isDelivered').get(function () {
-  return this.status === OrderStatus.DELIVERED;
+app.post('/api/tenants', async (req, res) => {
+  try {
+    const tenant = await multiTenantService.createTenant(req.body);
+    res.status(201).json(tenant);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
-OrderSchema.virtual('isCancelled').get(function () {
-  return this.status === OrderStatus.CANCELLED;
-});
-
-OrderSchema.virtual('daysSinceCreated').get(function () {
-  const diff = new Date().getTime() - this.createdAt.getTime();
-  return Math.floor(diff / (1000 * 60 * 60 * 24));
-});
-
-// Methods
-OrderSchema.methods.calculateTotals = function () {
-  this.subtotal = this.items.reduce(
-    (sum, item) => sum + item.price * item.quantity,
-    0,
+// Admin route to execute operation on all tenants
+app.post('/admin/execute-all-tenants', async (req, res) => {
+  const { operation, data } = req.body;
+  
+  const results = await multiTenantService.executeForAllTenants(
+    async (tenant) => {
+      switch (operation) {
+        case 'updateSettings':
+          return await updateTenantSettings(tenant, data);
+        case 'sendNotification':
+          return await sendTenantNotification(tenant, data);
+        case 'generateReport':
+          return await generateTenantReport(tenant, data);
+      }
+    },
+    { delay: 100 } // 100ms delay between tenants
   );
-
-  this.total = this.subtotal + this.taxAmount + this.shippingAmount - this.discountAmount;
-};
-
-OrderSchema.methods.canBeCancelled = function () {
-  const nonCancellableStatuses = [
-    OrderStatus.SHIPPED,
-    OrderStatus.DELIVERED,
-    OrderStatus.CANCELLED,
-    OrderStatus.REFUNDED,
-  ];
-  return !nonCancellableStatuses.includes(this.status);
-};
-
-OrderSchema.methods.updateStatus = function (newStatus: OrderStatus) {
-  const validTransitions: Record<OrderStatus, OrderStatus[]> = {
-    [OrderStatus.PENDING]: [OrderStatus.CONFIRMED, OrderStatus.CANCELLED],
-    [OrderStatus.CONFIRMED]: [OrderStatus.PROCESSING, OrderStatus.CANCELLED],
-    [OrderStatus.PROCESSING]: [OrderStatus.SHIPPED, OrderStatus.CANCELLED],
-    [OrderStatus.SHIPPED]: [OrderStatus.DELIVERED],
-    [OrderStatus.DELIVERED]: [OrderStatus.REFUNDED],
-    [OrderStatus.CANCELLED]: [],
-    [OrderStatus.REFUNDED]: [],
-  };
-
-  if (!validTransitions[this.status].includes(newStatus)) {
-    throw new Error(`Invalid status transition from ${this.status} to ${newStatus}`);
-  }
-
-  this.status = newStatus;
-
-  // Set timestamps
-  if (newStatus === OrderStatus.DELIVERED) {
-    this.deliveredAt = new Date();
-  } else if (newStatus === OrderStatus.CANCELLED) {
-    this.cancelledAt = new Date();
-  }
-};
-
-// Indexes
-OrderSchema.index({ createdAt: -1 });
-OrderSchema.index({ userId: 1, createdAt: -1 });
-OrderSchema.index({ status: 1, paymentStatus: 1 });
-OrderSchema.index({ 'items.productId': 1 });
-OrderSchema.index({ orderNumber: 'text', 'items.name': 'text' });
-
-// Pre-save middleware
-OrderSchema.pre('save', function (next) {
-  if (this.isModified('items') || this.isModified('taxAmount') || 
-      this.isModified('shippingAmount') || this.isModified('discountAmount')) {
-    this.calculateTotals();
-  }
-
-  // Generate order number if not present
-  if (!this.orderNumber) {
-    const timestamp = Date.now();
-    const random = Math.floor(Math.random() * 1000);
-    this.orderNumber = `ORD-${timestamp}-${random}`;
-  }
-
-  next();
+  
+  res.json(results);
 });
 ```
 
-#### **MongoDB Service with Aggregation**
-
-```typescript
-// src/orders/orders.service.ts
-import {
-  Injectable,
-  NotFoundException,
-  BadRequestException,
-  ConflictException,
-} from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types, ClientSession } from 'mongoose';
-import { Order, OrderStatus, PaymentStatus } from './schemas/order.schema';
-import { Product } from '../products/schemas/product.schema';
-import { CreateOrderDto, UpdateOrderDto, OrderQueryDto } from './dto';
-
-interface OrderStats {
-  totalOrders: number;
-  totalRevenue: number;
-  averageOrderValue: number;
-  ordersByStatus: Record<OrderStatus, number>;
-  revenueByMonth: Array<{ month: string; revenue: number }>;
-  topProducts: Array<{ productId: string; name: string; quantity: number }>;
-}
-
-@Injectable()
-export class OrdersService {
-  constructor(
-    @InjectModel(Order.name) private readonly orderModel: Model<Order>,
-    @InjectModel(Product.name) private readonly productModel: Model<Product>,
-  ) {}
-
-  // Create order with transaction
-  async create(createOrderDto: CreateOrderDto, userId: string): Promise<Order> {
-    const session = await this.orderModel.db.startSession();
-    
-    try {
-      session.startTransaction();
-
-      // Validate products and check stock
-      const productIds = createOrderDto.items.map((item) => item.productId);
-      const products = await this.productModel
-        .find({ _id: { $in: productIds } })
-        .session(session);
-
-      if (products.length !== productIds.length) {
-        throw new NotFoundException('Some products not found');
-      }
-
-      // Prepare order items and check stock
-      const orderItems = [];
-      const stockUpdates = [];
-
-      for (const item of createOrderDto.items) {
-        const product = products.find(
-          (p) => p._id.toString() === item.productId,
-        );
-
-        if (!product) {
-          throw new NotFoundException(`Product ${item.productId} not found`);
-        }
-
-        if (product.stockQuantity < item.quantity) {
-          throw new BadRequestException(
-            `Insufficient stock for product ${product.name}`,
-          );
-        }
-
-        orderItems.push({
-          productId: product._id,
-          name: product.name,
-          sku: product.sku,
-          price: product.price,
-          quantity: item.quantity,
-          subtotal: product.price * item.quantity,
-          attributes: item.attributes,
-        });
-
-        // Prepare stock update
-        stockUpdates.push({
-          updateOne: {
-            filter: { _id: product._id },
-            update: { $inc: { stockQuantity: -item.quantity } },
-          },
-        });
-      }
-
-      // Calculate totals
-      const subtotal = orderItems.reduce((sum, item) => sum + item.subtotal, 0);
-      const total =
-        subtotal +
-        (createOrderDto.taxAmount || 0) +
-        (createOrderDto.shippingAmount || 0) -
-        (createOrderDto.discountAmount || 0);
-
-      // Create order
-      const order = new this.orderModel({
-        ...createOrderDto,
-        userId: new Types.ObjectId(userId),
-        items: orderItems,
-        subtotal,
-        total,
-        status: OrderStatus.PENDING,
-        paymentStatus: PaymentStatus.PENDING,
-      });
-
-      // Execute updates in parallel
-      await Promise.all([
-        order.save({ session }),
-        this.productModel.bulkWrite(stockUpdates, { session }),
-      ]);
-
-      await session.commitTransaction();
-
-      // Populate customer and products
-      const populatedOrder = await this.orderModel
-        .findById(order._id)
-        .populate('customer', 'name email phone')
-        .populate('items.productId', 'name images')
-        .lean();
-
-      return populatedOrder;
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      await session.endSession();
-    }
-  }
-
-  // Advanced search with aggregation
-  async findAll(queryDto: OrderQueryDto) {
-    const {
-      page = 1,
-      limit = 20,
-      sortBy = 'createdAt',
-      sortOrder = 'desc',
-      status,
-      paymentStatus,
-      userId,
-      startDate,
-      endDate,
-      minTotal,
-      maxTotal,
-      search,
-    } = queryDto;
-
-    const skip = (page - 1) * limit;
-    const sortDirection = sortOrder === 'desc' ? -1 : 1;
-
-    // Build match conditions
-    const matchConditions: any = {};
-
-    if (status) {
-      matchConditions.status = status;
-    }
-
-    if (paymentStatus) {
-      matchConditions.paymentStatus = paymentStatus;
-    }
-
-    if (userId) {
-      matchConditions.userId = new Types.ObjectId(userId);
-    }
-
-    if (startDate || endDate) {
-      matchConditions.createdAt = {};
-      if (startDate) {
-        matchConditions.createdAt.$gte = new Date(startDate);
-      }
-      if (endDate) {
-        matchConditions.createdAt.$lte = new Date(endDate);
-      }
-    }
-
-    if (minTotal !== undefined || maxTotal !== undefined) {
-      matchConditions.total = {};
-      if (minTotal !== undefined) {
-        matchConditions.total.$gte = minTotal;
-      }
-      if (maxTotal !== undefined) {
-        matchConditions.total.$lte = maxTotal;
-      }
-    }
-
-    if (search) {
-      matchConditions.$or = [
-        { orderNumber: { $regex: search, $options: 'i' } },
-        { 'items.name': { $regex: search, $options: 'i' } },
-        { 'address.shippingAddress.city': { $regex: search, $options: 'i' } },
-      ];
-    }
-
-    // Aggregation pipeline
-    const pipeline = [
-      { $match: matchConditions },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'userId',
-          foreignField: '_id',
-          as: 'customer',
-        },
-      },
-      { $unwind: { path: '$customer', preserveNullAndEmptyArrays: true } },
-      {
-        $lookup: {
-          from: 'products',
-          localField: 'items.productId',
-          foreignField: '_id',
-          as: 'productDetails',
-        },
-      },
-      {
-        $addFields: {
-          itemCount: { $sum: '$items.quantity' },
-          customerName: '$customer.name',
-          customerEmail: '$customer.email',
-        },
-      },
-      {
-        $project: {
-          'customer.password': 0,
-          'customer.__v': 0,
-          'productDetails.__v': 0,
-        },
-      },
-      { $sort: { [sortBy]: sortDirection } },
-      {
-        $facet: {
-          metadata: [{ $count: 'total' }, { $addFields: { page, limit } }],
-          data: [{ $skip: skip }, { $limit: limit }],
-        },
-      },
-    ];
-
-    const [result] = await this.orderModel.aggregate(pipeline).exec();
-
-    const total = result.metadata[0]?.total || 0;
-    const data = result.data || [];
-
-    const totalPages = Math.ceil(total / limit);
-    const hasNext = page < totalPages;
-    const hasPrevious = page > 1;
-
-    return {
-      data,
-      total,
-      page: Number(page),
-      limit: Number(limit),
-      totalPages,
-      hasNext,
-      hasPrevious,
-    };
-  }
-
-  // Find by ID with population
-  async findOne(id: string): Promise<Order> {
-    const order = await this.orderModel
-      .findById(id)
-      .populate('customer', 'name email phone')
-      .populate('items.productId', 'name images price sku')
-      .lean();
-
-    if (!order) {
-      throw new NotFoundException('Order not found');
-    }
-
-    return order;
-  }
-
-  // Update order status with validation
-  async updateStatus(
-    id: string,
-    status: OrderStatus,
-    notes?: string,
-  ): Promise<Order> {
-    const order = await this.orderModel.findById(id);
-
-    if (!order) {
-      throw new NotFoundException('Order not found');
-    }
-
-    try {
-      order.updateStatus(status);
-      
-      if (notes) {
-        order.notes = order.notes ? `${order.notes}\n${notes}` : notes;
-      }
-
-      await order.save();
-
-      // If cancelled, restore stock
-      if (status === OrderStatus.CANCELLED) {
-        await this.restoreStock(order);
-      }
-
-      return order;
-    } catch (error) {
-      throw new BadRequestException(error.message);
-    }
-  }
-
-  // Analytics with aggregation
-  async getOrderStats(timeRange: 'day' | 'week' | 'month' | 'year'): Promise<OrderStats> {
-    const date = new Date();
-    let startDate: Date;
-
-    switch (timeRange) {
-      case 'day':
-        startDate = new Date(date.setDate(date.getDate() - 1));
-        break;
-      case 'week':
-        startDate = new Date(date.setDate(date.getDate() - 7));
-        break;
-      case 'month':
-        startDate = new Date(date.setMonth(date.getMonth() - 1));
-        break;
-      case 'year':
-        startDate = new Date(date.setFullYear(date.getFullYear() - 1));
-        break;
-      default:
-        startDate = new Date(date.setDate(date.getDate() - 30));
-    }
-
-    const pipeline = [
-      {
-        $match: {
-          createdAt: { $gte: startDate },
-          status: { $ne: OrderStatus.CANCELLED },
-        },
-      },
-      {
-        $facet: {
-          // Total orders and revenue
-          summary: [
-            {
-              $group: {
-                _id: null,
-                totalOrders: { $sum: 1 },
-                totalRevenue: { $sum: '$total' },
-                avgOrderValue: { $avg: '$total' },
-              },
-            },
-          ],
-          // Orders by status
-          byStatus: [
-            {
-              $group: {
-                _id: '$status',
-                count: { $sum: 1 },
-                revenue: { $sum: '$total' },
-              },
-            },
-          ],
-          // Revenue by month
-          revenueByMonth: [
-            {
-              $group: {
-                _id: {
-                  year: { $year: '$createdAt' },
-                  month: { $month: '$createdAt' },
-                },
-                revenue: { $sum: '$total' },
-                orders: { $sum: 1 },
-              },
-            },
-            { $sort: { '_id.year': -1, '_id.month': -1 } },
-            { $limit: 12 },
-          ],
-          // Top products
-          topProducts: [
-            { $unwind: '$items' },
-            {
-              $group: {
-                _id: '$items.productId',
-                name: { $first: '$items.name' },
-                quantity: { $sum: '$items.quantity' },
-                revenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
-              },
-            },
-            { $sort: { quantity: -1 } },
-            { $limit: 10 },
-          ],
-        },
-      },
-    ];
-
-    const [result] = await this.orderModel.aggregate(pipeline).exec();
-
-    const summary = result.summary[0] || {
-      totalOrders: 0,
-      totalRevenue: 0,
-      avgOrderValue: 0,
-    };
-
-    const ordersByStatus = {};
-    result.byStatus.forEach((item) => {
-      ordersByStatus[item._id] = item.count;
-    });
-
-    const revenueByMonth = result.revenueByMonth.map((item) => ({
-      month: `${item._id.year}-${item._id.month.toString().padStart(2, '0')}`,
-      revenue: item.revenue,
-      orders: item.orders,
-    }));
-
-    const topProducts = result.topProducts.map((item) => ({
-      productId: item._id.toString(),
-      name: item.name,
-      quantity: item.quantity,
-      revenue: item.revenue,
-    }));
-
-    return {
-      totalOrders: summary.totalOrders,
-      totalRevenue: summary.totalRevenue,
-      averageOrderValue: summary.avgOrderValue,
-      ordersByStatus,
-      revenueByMonth,
-      topProducts,
-    };
-  }
-
-  // Bulk operations
-  async bulkUpdateStatus(
-    orderIds: string[],
-    status: OrderStatus,
-  ): Promise<{ updated: number; failed: number }> {
-    const session = await this.orderModel.db.startSession();
-    
-    try {
-      session.startTransaction();
-
-      let updated = 0;
-      const failed: Array<{ id: string; error: string }> = [];
-
-      for (const orderId of orderIds) {
-        try {
-          const order = await this.orderModel.findById(orderId).session(session);
-
-          if (!order) {
-            failed.push({ id: orderId, error: 'Order not found' });
-            continue;
-          }
-
-          order.updateStatus(status);
-          await order.save({ session });
-          updated++;
-
-          // Restore stock if cancelled
-          if (status === OrderStatus.CANCELLED) {
-            await this.restoreStock(order, session);
-          }
-        } catch (error) {
-          failed.push({ id: orderId, error: error.message });
-        }
-      }
-
-      await session.commitTransaction();
-      return { updated, failed: failed.length };
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      await session.endSession();
-    }
-  }
-
-  // Search with text index
-  async searchOrders(query: string, limit: number = 50): Promise<Order[]> {
-    return this.orderModel
-      .find(
-        { $text: { $search: query } },
-        { score: { $meta: 'textScore' } },
-      )
-      .sort({ score: { $meta: 'textScore' } })
-      .limit(limit)
-      .populate('customer', 'name email')
-      .lean();
-  }
-
-  // Helper methods
-  private async restoreStock(order: Order, session?: ClientSession) {
-    const stockUpdates = order.items.map((item) => ({
-      updateOne: {
-        filter: { _id: item.productId },
-        update: { $inc: { stockQuantity: item.quantity } },
-      },
-    }));
-
-    const options = session ? { session } : {};
-    await this.productModel.bulkWrite(stockUpdates, options);
-  }
-
-  // Generate report
-  async generateSalesReport(startDate: Date, endDate: Date) {
-    const pipeline = [
-      {
-        $match: {
-          createdAt: { $gte: startDate, $lte: endDate },
-          status: { $ne: OrderStatus.CANCELLED },
-        },
-      },
-      { $unwind: '$items' },
-      {
-        $group: {
-          _id: {
-            productId: '$items.productId',
-            date: {
-              $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
-            },
-          },
-          productName: { $first: '$items.name' },
-          sku: { $first: '$items.sku' },
-          quantity: { $sum: '$items.quantity' },
-          revenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } },
-          orders: { $addToSet: '$_id' },
-        },
-      },
-      {
-        $group: {
-          _id: '$_id.productId',
-          productName: { $first: '$productName' },
-          sku: { $first: '$sku' },
-          totalQuantity: { $sum: '$quantity' },
-          totalRevenue: { $sum: '$revenue' },
-          dailySales: {
-            $push: {
-              date: '$_id.date',
-              quantity: '$quantity',
-              revenue: '$revenue',
-              orders: { $size: '$orders' },
-            },
-          },
-        },
-      },
-      { $sort: { totalRevenue: -1 } },
-    ];
-
-    return this.orderModel.aggregate(pipeline).exec();
-  }
-}
-```
-
-### 🎯 Real-World Scenario: E-commerce Platform with 1M+ Products
-*You're building an e-commerce platform with 1 million+ products, complex filtering, full-text search, real-time inventory updates, and high concurrency requirements. You need to support both SQL and NoSQL approaches.*
-
-**Interview Questions:**
-1. How would you design the database schema for 1M+ products with complex relationships?
-2. What strategies would you implement for search performance optimization?
-3. How do you handle inventory management with high concurrency?
-4. What caching strategies would you use for product listings?
-5. How would you implement real-time price updates across multiple regions?
-
-**Technical Questions:**
-1. What are the trade-offs between PostgreSQL and MongoDB for e-commerce?
-2. How do you implement full-text search in both databases?
-3. What are the best practices for database transactions in high-concurrency systems?
-4. How do you handle database migrations for large datasets?
+### Interview Questions
+**Technical:**
+1. Compare different multi-tenant isolation strategies (database, schema, row).
+2. How do you handle tenant-specific configurations and settings?
+3. Explain how you would implement cross-tenant data isolation.
+4. What are the performance considerations for multi-tenant architectures?
+5. How would you handle tenant migrations and backups?
+
+**Scenario-based:**
+1. A tenant needs to export all their data for compliance. How would you implement this?
+2. How would you handle a tenant that exceeds their storage quota?
+3. Describe how you would implement tenant-specific custom domains with SSL certificates.
+4. Your multi-tenant system needs to support 10,000 tenants. How would you scale it?
+5. How would you handle a situation where one tenant's heavy usage affects other tenants' performance?
 
 ---
 
-## 4. File Uploads
-
-### 📖 In-Depth Explanation
-
-Comprehensive file upload system with validation, processing, CDN integration, and security features.
-
-#### **Complete File Upload Service**
-
-```typescript
-// src/file-upload/file-upload.service.ts
-import {
-  Injectable,
-  BadRequestException,
-  InternalServerErrorException,
-  NotFoundException,
-} from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { createHash } from 'crypto';
-import { promisify } from 'util';
-import { pipeline, Readable } from 'stream';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as sharp from 'sharp';
-import * as ffmpeg from 'fluent-ffmpeg';
-import { FileTypeValidator, MaxFileSizeValidator } from '@nestjs/common';
-import { MulterOptions } from '@nestjs/platform-express/multer/interfaces/multer-options.interface';
-
-export enum FileType {
-  IMAGE = 'image',
-  VIDEO = 'video',
-  DOCUMENT = 'document',
-  AUDIO = 'audio',
-  ARCHIVE = 'archive',
-  OTHER = 'other',
-}
-
-export enum FileStatus {
-  UPLOADING = 'uploading',
-  PROCESSING = 'processing',
-  READY = 'ready',
-  FAILED = 'failed',
-  DELETED = 'deleted',
-}
-
-interface FileMetadata {
-  originalName: string;
-  mimeType: string;
-  size: number;
-  width?: number;
-  height?: number;
-  duration?: number;
-  encoding?: string;
-  hash: string;
-}
-
-interface UploadOptions {
-  maxSize?: number;
-  allowedTypes?: string[];
-  generateThumbnail?: boolean;
-  optimizeImage?: boolean;
-  compressVideo?: boolean;
-  watermark?: boolean;
-  expirationHours?: number;
-  private?: boolean;
-  tags?: Record<string, string>;
-}
-
-@Injectable()
-export class FileUploadService {
-  private s3Client: S3Client;
-  private readonly uploadDir: string;
-  private readonly maxFileSize: number;
-  private readonly allowedMimeTypes: Record<FileType, string[]>;
-
-  constructor(private readonly configService: ConfigService) {
-    this.s3Client = new S3Client({
-      region: this.configService.get('AWS_REGION'),
-      credentials: {
-        accessKeyId: this.configService.get('AWS_ACCESS_KEY_ID'),
-        secretAccessKey: this.configService.get('AWS_SECRET_ACCESS_KEY'),
-      },
-    });
-
-    this.uploadDir = this.configService.get('UPLOAD_DIR', './uploads');
-    this.maxFileSize = 100 * 1024 * 1024; // 100MB
-
-    this.allowedMimeTypes = {
-      [FileType.IMAGE]: [
-        'image/jpeg',
-        'image/png',
-        'image/gif',
-        'image/webp',
-        'image/svg+xml',
-      ],
-      [FileType.VIDEO]: [
-        'video/mp4',
-        'video/mpeg',
-        'video/ogg',
-        'video/webm',
-        'video/quicktime',
-      ],
-      [FileType.DOCUMENT]: [
-        'application/pdf',
-        'application/msword',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'application/vnd.ms-excel',
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'text/plain',
-        'text/csv',
-      ],
-      [FileType.AUDIO]: [
-        'audio/mpeg',
-        'audio/wav',
-        'audio/ogg',
-        'audio/webm',
-      ],
-      [FileType.ARCHIVE]: [
-        'application/zip',
-        'application/x-rar-compressed',
-        'application/x-tar',
-        'application/gzip',
-      ],
-      [FileType.OTHER]: [],
-    };
-
-    // Ensure upload directory exists
-    if (!fs.existsSync(this.uploadDir)) {
-      fs.mkdirSync(this.uploadDir, { recursive: true });
-    }
-  }
-
-  // Get Multer configuration
-  getMulterOptions(options?: UploadOptions): MulterOptions {
-    const maxSize = options?.maxSize || this.maxFileSize;
-    const allowedTypes = options?.allowedTypes || Object.values(this.allowedMimeTypes).flat();
-
-    return {
-      dest: this.uploadDir,
-      limits: {
-        fileSize: maxSize,
-        files: options?.private ? 1 : 10, // Limit files per request
-      },
-      fileFilter: (req, file, callback) => {
-        this.validateFile(file, allowedTypes, maxSize)
-          .then(() => callback(null, true))
-          .catch((error) => callback(error, false));
-      },
-      storage: this.createStorageEngine(),
-    };
-  }
-
-  // Main upload method
-  async uploadFile(
-    file: Express.Multer.File,
-    userId: string,
-    options: UploadOptions = {},
-  ): Promise<{
-    fileId: string;
-    url: string;
-    thumbnailUrl?: string;
-    metadata: FileMetadata;
-    status: FileStatus;
-  }> {
-    try {
-      // Validate file
-      await this.validateFile(file, options.allowedTypes, options.maxSize);
-
-      // Generate file hash
-      const hash = await this.generateFileHash(file.path);
-
-      // Check for duplicate files
-      const existingFile = await this.findDuplicateFile(hash, userId);
-      if (existingFile && !options.private) {
-        // Return existing file instead of uploading again
-        return {
-          fileId: existingFile.id,
-          url: existingFile.url,
-          thumbnailUrl: existingFile.thumbnailUrl,
-          metadata: existingFile.metadata,
-          status: FileStatus.READY,
-        };
-      }
-
-      // Determine file type
-      const fileType = this.getFileType(file.mimetype);
-      const fileId = this.generateFileId(userId, fileType);
-
-      // Process file based on type
-      const processedFile = await this.processFile(file, fileType, options);
-
-      // Upload to storage (S3 or local)
-      const uploadResult = await this.uploadToStorage(
-        processedFile,
-        fileId,
-        options,
-      );
-
-      // Generate thumbnail if needed
-      let thumbnailUrl: string | undefined;
-      if (options.generateThumbnail && this.canGenerateThumbnail(fileType)) {
-        thumbnailUrl = await this.generateThumbnail(processedFile, fileId);
-      }
-
-      // Extract metadata
-      const metadata = await this.extractMetadata(processedFile, file);
-
-      // Save file record to database
-      const fileRecord = await this.saveFileRecord({
-        id: fileId,
-        userId,
-        originalName: file.originalname,
-        fileName: uploadResult.fileName,
-        url: uploadResult.url,
-        thumbnailUrl,
-        type: fileType,
-        status: FileStatus.READY,
-        metadata,
-        size: file.size,
-        mimeType: file.mimetype,
-        isPrivate: options.private || false,
-        tags: options.tags,
-        expirationDate: options.expirationHours
-          ? new Date(Date.now() + options.expirationHours * 60 * 60 * 1000)
-          : null,
-      });
-
-      // Clean up local file
-      await this.cleanupLocalFile(processedFile.path);
-
-      return {
-        fileId: fileRecord.id,
-        url: fileRecord.url,
-        thumbnailUrl: fileRecord.thumbnailUrl,
-        metadata: fileRecord.metadata,
-        status: fileRecord.status,
-      };
-    } catch (error) {
-      throw new InternalServerErrorException(
-        `Failed to upload file: ${error.message}`,
-      );
-    }
-  }
-
-  // Multipart upload for large files
-  async initiateMultipartUpload(
-    fileName: string,
-    fileType: string,
-    userId: string,
-    options: UploadOptions = {},
-  ): Promise<{
-    uploadId: string;
-    fileId: string;
-    partSize: number;
-    urls: string[];
-  }> {
-    const fileTypeEnum = this.getFileType(fileType);
-    const fileId = this.generateFileId(userId, fileTypeEnum);
-    const partSize = 5 * 1024 * 1024; // 5MB parts
-
-    // Create multipart upload in S3
-    const command = new CreateMultipartUploadCommand({
-      Bucket: this.configService.get('AWS_S3_BUCKET'),
-      Key: this.getS3Key(fileId, fileName),
-      ContentType: fileType,
-      Metadata: {
-        userId,
-        private: options.private?.toString() || 'false',
-        ...options.tags,
-      },
-    });
-
-    const response = await this.s3Client.send(command);
-    const uploadId = response.UploadId;
-
-    // Generate pre-signed URLs for each part
-    const totalParts = Math.ceil(options.maxSize || this.maxFileSize / partSize);
-    const urls = [];
-
-    for (let partNumber = 1; partNumber <= totalParts; partNumber++) {
-      const url = await getSignedUrl(
-        this.s3Client,
-        new UploadPartCommand({
-          Bucket: this.configService.get('AWS_S3_BUCKET'),
-          Key: this.getS3Key(fileId, fileName),
-          UploadId: uploadId,
-          PartNumber: partNumber,
-        }),
-        { expiresIn: 3600 },
-      );
-      urls.push(url);
-    }
-
-    // Save upload record
-    await this.saveUploadRecord({
-      uploadId,
-      fileId,
-      userId,
-      fileName,
-      fileType: fileTypeEnum,
-      partSize,
-      totalParts,
-      status: FileStatus.UPLOADING,
-      options,
-    });
-
-    return {
-      uploadId,
-      fileId,
-      partSize,
-      urls,
-    };
-  }
-
-  async completeMultipartUpload(
-    uploadId: string,
-    fileId: string,
-    parts: Array<{ ETag: string; PartNumber: number }>,
-  ): Promise<any> {
-    const uploadRecord = await this.getUploadRecord(uploadId);
-    if (!uploadRecord) {
-      throw new NotFoundException('Upload not found');
-    }
-
-    // Complete multipart upload in S3
-    const command = new CompleteMultipartUploadCommand({
-      Bucket: this.configService.get('AWS_S3_BUCKET'),
-      Key: this.getS3Key(fileId, uploadRecord.fileName),
-      UploadId: uploadId,
-      MultipartUpload: { Parts: parts },
-    });
-
-    await this.s3Client.send(command);
-
-    // Update file record
-    const url = `https://${this.configService.get('AWS_S3_BUCKET')}.s3.amazonaws.com/${this.getS3Key(fileId, uploadRecord.fileName)}`;
-    
-    await this.updateFileRecord(fileId, {
-      url,
-      status: FileStatus.READY,
-    });
-
-    // Clean up upload record
-    await this.deleteUploadRecord(uploadId);
-
-    return { fileId, url };
-  }
-
-  // File processing methods
-  private async processFile(
-    file: Express.Multer.File,
-    fileType: FileType,
-    options: UploadOptions,
-  ): Promise<Express.Multer.File & { buffer?: Buffer }> {
-    const processedFile = { ...file };
-
-    switch (fileType) {
-      case FileType.IMAGE:
-        if (options.optimizeImage) {
-          processedFile.buffer = await this.optimizeImage(file.path, options);
-          processedFile.size = processedFile.buffer.length;
-        }
-        break;
-
-      case FileType.VIDEO:
-        if (options.compressVideo) {
-          const compressedPath = await this.compressVideo(file.path);
-          processedFile.path = compressedPath;
-          processedFile.size = fs.statSync(compressedPath).size;
-        }
-        break;
-
-      case FileType.DOCUMENT:
-        if (options.watermark) {
-          processedFile.buffer = await this.addWatermarkToPdf(file.path);
-          processedFile.size = processedFile.buffer.length;
-        }
-        break;
-    }
-
-    return processedFile;
-  }
-
-  private async optimizeImage(
-    filePath: string,
-    options: UploadOptions,
-  ): Promise<Buffer> {
-    let sharpInstance = sharp(filePath);
-
-    // Resize if needed
-    if (options.maxSize) {
-      sharpInstance = sharpInstance.resize(2000, 2000, {
-        fit: 'inside',
-        withoutEnlargement: true,
-      });
-    }
-
-    // Convert to WebP for better compression
-    sharpInstance = sharpInstance.webp({
-      quality: 80,
-      effort: 6,
-    });
-
-    // Strip metadata
-    sharpInstance = sharpInstance.withMetadata({
-      exif: {},
-      iptc: {},
-      xmp: {},
-      tiff: {},
-    });
-
-    return sharpInstance.toBuffer();
-  }
-
-  private async generateThumbnail(
-    file: Express.Multer.File & { buffer?: Buffer },
-    fileId: string,
-  ): Promise<string> {
-    const thumbnailBuffer = await sharp(file.buffer || file.path)
-      .resize(300, 300, {
-        fit: 'cover',
-        position: 'center',
-      })
-      .jpeg({ quality: 70 })
-      .toBuffer();
-
-    const thumbnailName = `${fileId}_thumbnail.jpg`;
-    const thumbnailKey = `thumbnails/${thumbnailName}`;
-
-    await this.s3Client.send(
-      new PutObjectCommand({
-        Bucket: this.configService.get('AWS_S3_BUCKET'),
-        Key: thumbnailKey,
-        Body: thumbnailBuffer,
-        ContentType: 'image/jpeg',
-        ACL: 'public-read',
-      }),
-    );
-
-    return `https://${this.configService.get('AWS_S3_BUCKET')}.s3.amazonaws.com/${thumbnailKey}`;
-  }
-
-  private async compressVideo(filePath: string): Promise<string> {
-    const outputPath = path.join(
-      this.uploadDir,
-      `compressed_${Date.now()}_${path.basename(filePath)}`,
-    );
-
-    return new Promise((resolve, reject) => {
-      ffmpeg(filePath)
-        .videoCodec('libx264')
-        .audioCodec('aac')
-        .outputOptions([
-          '-crf 23',
-          '-preset fast',
-          '-movflags +faststart',
-        ])
-        .on('end', () => resolve(outputPath))
-        .on('error', reject)
-        .save(outputPath);
-    });
-  }
-
-  // Storage methods
-  private async uploadToStorage(
-    file: Express.Multer.File & { buffer?: Buffer },
-    fileId: string,
-    options: UploadOptions,
-  ): Promise<{ fileName: string; url: string }> {
-    const fileName = `${fileId}${path.extname(file.originalname)}`;
-    const fileKey = this.getFileKey(fileId, fileName, options.private);
-
-    // Upload to S3
-    if (this.configService.get('STORAGE_TYPE') === 's3') {
-      const fileBody = file.buffer || fs.createReadStream(file.path);
-      
-      await this.s3Client.send(
-        new PutObjectCommand({
-          Bucket: this.configService.get('AWS_S3_BUCKET'),
-          Key: fileKey,
-          Body: fileBody,
-          ContentType: file.mimetype,
-          ContentLength: file.size,
-          ACL: options.private ? 'private' : 'public-read',
-          Metadata: {
-            originalName: file.originalname,
-            userId: options.private ? 'private' : undefined,
-            ...options.tags,
-          },
-        }),
-      );
-
-      const url = options.private
-        ? await this.generatePresignedUrl(fileKey)
-        : `https://${this.configService.get('AWS_S3_BUCKET')}.s3.amazonaws.com/${fileKey}`;
-
-      return { fileName, url };
-    } else {
-      // Local storage
-      const localPath = path.join(this.uploadDir, fileKey);
-      const dir = path.dirname(localPath);
-
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-
-      if (file.buffer) {
-        fs.writeFileSync(localPath, file.buffer);
-      } else {
-        fs.copyFileSync(file.path, localPath);
-      }
-
-      const url = `/uploads/${fileKey}`;
-      return { fileName, url };
-    }
-  }
-
-  // File validation
-  private async validateFile(
-    file: Express.Multer.File,
-    allowedTypes?: string[],
-    maxSize?: number,
-  ): Promise<void> {
-    // Check file size
-    const fileSize = maxSize || this.maxFileSize;
-    if (file.size > fileSize) {
-      throw new BadRequestException(
-        `File size exceeds limit of ${fileSize / 1024 / 1024}MB`,
-      );
-    }
-
-    // Check file type
-    const allowedMimeTypes = allowedTypes || Object.values(this.allowedMimeTypes).flat();
-    if (!allowedMimeTypes.includes(file.mimetype)) {
-      throw new BadRequestException(
-        `File type ${file.mimetype} is not allowed`,
-      );
-    }
-
-    // Check for malicious files
-    await this.scanForMalware(file.path);
-
-    // Validate image dimensions if it's an image
-    if (file.mimetype.startsWith('image/')) {
-      await this.validateImageDimensions(file.path);
-    }
-  }
-
-  private async validateImageDimensions(filePath: string): Promise<void> {
-    const metadata = await sharp(filePath).metadata();
-    
-    if (metadata.width > 10000 || metadata.height > 10000) {
-      throw new BadRequestException('Image dimensions too large');
-    }
-
-    if (metadata.width < 10 || metadata.height < 10) {
-      throw new BadRequestException('Image dimensions too small');
-    }
-  }
-
-  private async scanForMalware(filePath: string): Promise<void> {
-    // Integrate with ClamAV or similar antivirus
-    // This is a placeholder implementation
-    const maliciousPatterns = [
-      /eval\(/i,
-      /base64_decode/i,
-      /system\(/i,
-      /shell_exec\(/i,
-    ];
-
-    const content = fs.readFileSync(filePath, 'utf8');
-    for (const pattern of maliciousPatterns) {
-      if (pattern.test(content)) {
-        throw new BadRequestException('File contains suspicious content');
-      }
-    }
-  }
-
-  // Utility methods
-  private getFileType(mimeType: string): FileType {
-    if (mimeType.startsWith('image/')) return FileType.IMAGE;
-    if (mimeType.startsWith('video/')) return FileType.VIDEO;
-    if (mimeType.startsWith('audio/')) return FileType.AUDIO;
-    if (
-      mimeType.startsWith('application/pdf') ||
-      mimeType.includes('document') ||
-      mimeType.includes('text/')
-    ) {
-      return FileType.DOCUMENT;
-    }
-    if (
-      mimeType.includes('zip') ||
-      mimeType.includes('rar') ||
-      mimeType.includes('tar') ||
-      mimeType.includes('gzip')
-    ) {
-      return FileType.ARCHIVE;
-    }
-    return FileType.OTHER;
-  }
-
-  private canGenerateThumbnail(fileType: FileType): boolean {
-    return [FileType.IMAGE, FileType.VIDEO].includes(fileType);
-  }
-
-  private generateFileId(userId: string, fileType: FileType): string {
-    const timestamp = Date.now();
-    const random = Math.random().toString(36).substr(2, 9);
-    return `${fileType}_${userId}_${timestamp}_${random}`;
-  }
-
-  private getFileKey(fileId: string, fileName: string, isPrivate?: boolean): string {
-    const prefix = isPrivate ? 'private/' : 'public/';
-    const date = new Date();
-    const year = date.getFullYear();
-    const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    const day = date.getDate().toString().padStart(2, '0');
-    
-    return `${prefix}${year}/${month}/${day}/${fileId}/${fileName}`;
-  }
-
-  private getS3Key(fileId: string, fileName: string): string {
-    return this.getFileKey(fileId, fileName, false);
-  }
-
-  private async generateFileHash(filePath: string): Promise<string> {
-    const hash = createHash('sha256');
-    const stream = fs.createReadStream(filePath);
-
-    return new Promise((resolve, reject) => {
-      stream.on('data', (chunk) => hash.update(chunk));
-      stream.on('end', () => resolve(hash.digest('hex')));
-      stream.on('error', reject);
-    });
-  }
-
-  private async generatePresignedUrl(key: string, expiresIn = 3600): Promise<string> {
-    const command = new GetObjectCommand({
-      Bucket: this.configService.get('AWS_S3_BUCKET'),
-      Key: key,
-    });
-
-    return getSignedUrl(this.s3Client, command, { expiresIn });
-  }
-
-  private async extractMetadata(
-    file: Express.Multer.File & { buffer?: Buffer },
-    originalFile: Express.Multer.File,
-  ): Promise<FileMetadata> {
-    const metadata: FileMetadata = {
-      originalName: originalFile.originalname,
-      mimeType: originalFile.mimetype,
-      size: originalFile.size,
-      hash: await this.generateFileHash(originalFile.path),
-    };
-
-    if (originalFile.mimetype.startsWith('image/')) {
-      const imageMetadata = await sharp(originalFile.path).metadata();
-      metadata.width = imageMetadata.width;
-      metadata.height = imageMetadata.height;
-    }
-
-    if (originalFile.mimetype.startsWith('video/')) {
-      // Extract video duration using ffprobe
-      const duration = await this.getVideoDuration(originalFile.path);
-      if (duration) {
-        metadata.duration = duration;
-      }
-    }
-
-    return metadata;
-  }
-
-  private async getVideoDuration(filePath: string): Promise<number | undefined> {
-    return new Promise((resolve) => {
-      ffmpeg.ffprobe(filePath, (err, metadata) => {
-        if (err) resolve(undefined);
-        resolve(metadata.format.duration);
-      });
-    });
-  }
-
-  // Database operations (placeholder - implement with your ORM)
-  private async saveFileRecord(data: any): Promise<any> {
-    // Implement with TypeORM/Mongoose
-    return data;
-  }
-
-  private async findDuplicateFile(hash: string, userId: string): Promise<any> {
-    // Implement duplicate detection
-    return null;
-  }
-
-  private async saveUploadRecord(data: any): Promise<any> {
-    // Implement upload tracking
-    return data;
-  }
-
-  private async getUploadRecord(uploadId: string): Promise<any> {
-    // Implement upload record retrieval
-    return null;
-  }
-
-  private async updateFileRecord(fileId: string, updates: any): Promise<any> {
-    // Implement file record update
-    return null;
-  }
-
-  private async deleteUploadRecord(uploadId: string): Promise<void> {
-    // Implement upload record deletion
-  }
-
-  private createStorageEngine(): any {
-    // Custom storage engine for Multer
-    return {
-      _handleFile: (req, file, callback) => {
-        // Implement custom storage logic
-      },
-      _removeFile: (req, file, callback) => {
-        // Implement file removal logic
-      },
-    };
-  }
-
-  private async cleanupLocalFile(filePath: string): Promise<void> {
-    if (fs.existsSync(filePath)) {
-      try {
-        await promisify(fs.unlink)(filePath);
-      } catch (error) {
-        console.error('Failed to cleanup local file:', error);
-      }
-    }
-  }
-
-  // Public API methods
-  async getFile(fileId: string, userId?: string): Promise<any> {
-    // Implement file retrieval with access control
-  }
-
-  async deleteFile(fileId: string, userId: string): Promise<void> {
-    // Implement file deletion with cleanup
-  }
-
-  async listFiles(userId: string, filters?: any): Promise<any[]> {
-    // Implement file listing with pagination
-  }
-
-  async updateFileMetadata(fileId: string, updates: any, userId: string): Promise<any> {
-    // Implement metadata updates
-  }
-
-  async generateDownloadUrl(fileId: string, userId?: string): Promise<string> {
-    // Implement secure download URL generation
-  }
-}
+## Installation & Setup
+
+### Prerequisites
+- Node.js 16+
+- PostgreSQL 12+
+- MongoDB 4.4+
+- Redis 6+
+- Docker (optional)
+
+### Environment Variables
+```bash
+# Database
+DATABASE_URL=postgresql://user:password@localhost:5432/main_db
+MONGODB_URI=mongodb://localhost:27017/app
+REDIS_URL=redis://localhost:6379
+
+# JWT
+JWT_ACCESS_SECRET=your_access_secret_key
+JWT_REFRESH_SECRET=your_refresh_secret_key
+
+# Email
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your-email@gmail.com
+SMTP_PASS=your-app-password
+
+# Storage
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+AWS_S3_BUCKET=your-bucket-name
+
+# Stripe
+STRIPE_SECRET_KEY=your_stripe_secret_key
+STRIPE_WEBHOOK_SECRET=your_webhook_secret
+
+# App
+PORT=3000
+NODE_ENV=production
+CLIENT_URL=http://localhost:3000
 ```
 
-#### **File Upload Controller with Validation**
+### Running with Docker
+```yaml
+version: '3.8'
+services:
+  postgres:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: main_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
-```typescript
-// src/file-upload/file-upload.controller.ts
-import {
-  Controller,
-  Post,
-  Get,
-  Delete,
-  Put,
-  Param,
-  Query,
-  Body,
-  UploadedFile,
-  UploadedFiles,
-  UseInterceptors,
-  UseGuards,
-  ParseIntPipe,
-  ParseUUIDPipe,
-} from '@nestjs/common';
-import { FileInterceptor, FilesInterceptor, AnyFilesInterceptor } from '@nestjs/platform-express';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { PermissionGuard } from '../rbac/guards/permission.guard';
-import { Permission } from '../rbac/decorators/permission.decorator';
-import { FileUploadService, FileType } from './file-upload.service';
-import {
-  UploadFileDto,
-  InitiateMultipartUploadDto,
-  CompleteMultipartUploadDto,
-  UpdateFileMetadataDto,
-} from './dto';
+  mongodb:
+    image: mongo:5
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
 
-@Controller('files')
-@UseGuards(JwtAuthGuard, PermissionGuard)
-export class FileUploadController {
-  constructor(private readonly fileUploadService: FileUploadService) {}
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
 
-  @Post('upload')
-  @Permission('file', 'upload')
-  @UseInterceptors(FileInterceptor('file'))
-  async uploadFile(
-    @UploadedFile() file: Express.Multer.File,
-    @Body() uploadFileDto: UploadFileDto,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    return this.fileUploadService.uploadFile(file, userId, {
-      maxSize: uploadFileDto.maxSize,
-      allowedTypes: uploadFileDto.allowedTypes,
-      generateThumbnail: uploadFileDto.generateThumbnail,
-      optimizeImage: uploadFileDto.optimizeImage,
-      private: uploadFileDto.private,
-      expirationHours: uploadFileDto.expirationHours,
-      tags: uploadFileDto.tags,
-    });
-  }
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/main_db
+      - MONGODB_URI=mongodb://mongodb:27017/app
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - mongodb
+      - redis
 
-  @Post('upload/multiple')
-  @Permission('file', 'upload')
-  @UseInterceptors(FilesInterceptor('files', 10))
-  async uploadMultipleFiles(
-    @UploadedFiles() files: Express.Multer.File[],
-    @Body() uploadFileDto: UploadFileDto,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    const results = [];
-
-    for (const file of files) {
-      try {
-        const result = await this.fileUploadService.uploadFile(file, userId, {
-          maxSize: uploadFileDto.maxSize,
-          allowedTypes: uploadFileDto.allowedTypes,
-          generateThumbnail: uploadFileDto.generateThumbnail,
-          optimizeImage: uploadFileDto.optimizeImage,
-          private: uploadFileDto.private,
-          tags: uploadFileDto.tags,
-        });
-        results.push({ success: true, ...result });
-      } catch (error) {
-        results.push({
-          success: false,
-          fileName: file.originalname,
-          error: error.message,
-        });
-      }
-    }
-
-    return {
-      total: files.length,
-      successful: results.filter((r) => r.success).length,
-      failed: results.filter((r) => !r.success).length,
-      results,
-    };
-  }
-
-  @Post('upload/large/initiate')
-  @Permission('file', 'upload')
-  async initiateMultipartUpload(
-    @Body() initiateDto: InitiateMultipartUploadDto,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    return this.fileUploadService.initiateMultipartUpload(
-      initiateDto.fileName,
-      initiateDto.fileType,
-      userId,
-      {
-        maxSize: initiateDto.maxSize,
-        private: initiateDto.private,
-        tags: initiateDto.tags,
-      },
-    );
-  }
-
-  @Post('upload/large/complete/:uploadId')
-  @Permission('file', 'upload')
-  async completeMultipartUpload(
-    @Param('uploadId') uploadId: string,
-    @Body() completeDto: CompleteMultipartUploadDto,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    return this.fileUploadService.completeMultipartUpload(
-      uploadId,
-      completeDto.fileId,
-      completeDto.parts,
-    );
-  }
-
-  @Get()
-  @Permission('file', 'read')
-  async listFiles(
-    @Query('page', ParseIntPipe) page: number = 1,
-    @Query('limit', ParseIntPipe) limit: number = 20,
-    @Query('type') type?: FileType,
-    @Query('search') search?: string,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    return this.fileUploadService.listFiles(userId, {
-      page,
-      limit,
-      type,
-      search,
-    });
-  }
-
-  @Get(':id')
-  @Permission('file', 'read')
-  async getFile(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    return this.fileUploadService.getFile(id, userId);
-  }
-
-  @Get(':id/download')
-  @Permission('file', 'download')
-  async downloadFile(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    const downloadUrl = await this.fileUploadService.generateDownloadUrl(
-      id,
-      userId,
-    );
-
-    return { downloadUrl };
-  }
-
-  @Put(':id/metadata')
-  @Permission('file', 'update')
-  async updateFileMetadata(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() updateDto: UpdateFileMetadataDto,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    return this.fileUploadService.updateFileMetadata(id, updateDto, userId);
-  }
-
-  @Delete(':id')
-  @Permission('file', 'delete')
-  async deleteFile(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    await this.fileUploadService.deleteFile(id, userId);
-    
-    return { message: 'File deleted successfully' };
-  }
-
-  // Image processing endpoints
-  @Post(':id/process')
-  @Permission('file', 'update')
-  async processImage(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() processOptions: any,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    // Implement image processing (resize, crop, filter, etc.)
-    return { message: 'Image processing queued' };
-  }
-
-  // File conversion endpoints
-  @Post(':id/convert')
-  @Permission('file', 'update')
-  async convertFile(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body('targetFormat') targetFormat: string,
-    @Request() req,
-  ) {
-    const userId = req.user.userId;
-    
-    // Implement file format conversion
-    return { message: 'File conversion queued' };
-  }
-
-  // Statistics
-  @Get('stats/usage')
-  @Permission('file', 'read')
-  async getUsageStats(@Request() req) {
-    const userId = req.user.userId;
-    
-    // Implement usage statistics
-    return {
-      totalFiles: 0,
-      totalSize: 0,
-      byType: {},
-      last30Days: [],
-    };
-  }
-}
+volumes:
+  postgres_data:
+  mongo_data:
+  redis_data:
 ```
 
-#### **File Validation Pipes**
+## Conclusion
 
-```typescript
-// src/file-upload/pipes/file-validation.pipe.ts
-import {
-  PipeTransform,
-  Injectable,
-  ArgumentMetadata,
-  BadRequestException,
-} from '@nestjs/common';
-import { FileTypeValidator as NestFileTypeValidator } from '@nestjs/common';
+This comprehensive backend implementation covers essential systems for modern web applications. Each component is designed with scalability, security, and maintainability in mind. The implementations include:
 
-@Injectable()
-export class FileSizeValidationPipe implements PipeTransform {
-  constructor(private readonly maxSize: number) {}
+1. **Production-ready code** with error handling and validation
+2. **Security best practices** including token rotation and input validation
+3. **Performance optimizations** with caching and connection pooling
+4. **Monitoring and logging** for production debugging
+5. **Scalability considerations** for horizontal scaling
 
-  transform(value: any, metadata: ArgumentMetadata) {
-    if (metadata.type !== 'body' || !value) {
-      return value;
-    }
+The system is modular and can be adapted to various use cases. Each service can be deployed independently or as part of a monolithic application, depending on your architecture needs.
 
-    const file = value.file || value;
-    if (file && file.size > this.maxSize) {
-      throw new BadRequestException(
-        `File size exceeds limit of ${this.maxSize / 1024 / 1024}MB`,
-      );
-    }
+Remember to:
+- Add comprehensive testing for each component
+- Implement proper monitoring and alerting
+- Set up CI/CD pipelines
+- Regularly update dependencies
+- Conduct security audits
+- Monitor performance metrics
 
-    return value;
-  }
-}
-
-@Injectable()
-export class FileTypeValidationPipe implements PipeTransform {
-  constructor(private readonly allowedTypes: string[]) {}
-
-  transform(value: any, metadata: ArgumentMetadata) {
-    if (metadata.type !== 'body' || !value) {
-      return value;
-    }
-
-    const file = value.file || value;
-    if (file && !this.allowedTypes.includes(file.mimetype)) {
-      throw new BadRequestException(
-        `File type ${file.mimetype} is not allowed. Allowed types: ${this.allowedTypes.join(', ')}`,
-      );
-    }
-
-    return value;
-  }
-}
-
-@Injectable()
-export class ImageDimensionsValidationPipe implements PipeTransform {
-  constructor(
-    private readonly minWidth?: number,
-    private readonly maxWidth?: number,
-    private readonly minHeight?: number,
-    private readonly maxHeight?: number,
-  ) {}
-
-  async transform(value: any, metadata: ArgumentMetadata) {
-    if (metadata.type !== 'body' || !value) {
-      return value;
-    }
-
-    const file = value.file || value;
-    if (file && file.mimetype.startsWith('image/')) {
-      const sharp = require('sharp');
-      const metadata = await sharp(file.buffer).metadata();
-
-      if (this.minWidth && metadata.width < this.minWidth) {
-        throw new BadRequestException(
-          `Image width must be at least ${this.minWidth}px`,
-        );
-      }
-
-      if (this.maxWidth && metadata.width > this.maxWidth) {
-        throw new BadRequestException(
-          `Image width must not exceed ${this.maxWidth}px`,
-        );
-      }
-
-      if (this.minHeight && metadata.height < this.minHeight) {
-        throw new BadRequestException(
-          `Image height must be at least ${this.minHeight}px`,
-        );
-      }
-
-      if (this.maxHeight && metadata.height > this.maxHeight) {
-        throw new BadRequestException(
-          `Image height must not exceed ${this.maxHeight}px`,
-        );
-      }
-    }
-
-    return value;
-  }
-}
-```
-
-### 🎯 Real-World Scenario: Video Streaming Platform
-*You're building a video streaming platform like YouTube. Users can upload videos up to 4GB, which need to be processed (transcoded into multiple resolutions), stored efficiently, and delivered via CDN with adaptive bitrate streaming.*
-
-**Interview Questions:**
-1. How would you design the file upload system for 4GB videos?
-2. What strategies would you implement for video transcoding at scale?
-3. How do you handle partial upload failures and resume functionality?
-4. What CDN strategy would you use for global video delivery?
-5. How do you implement DRM (Digital Rights Management) for premium content?
-
-**Technical Questions:**
-1. What are the challenges of multipart uploads and how do you handle them?
-2. How do you implement video transcoding pipelines with FFmpeg?
-3. What are the best practices for storing large files in the cloud?
-4. How do you handle metadata extraction from different file types?
-
----
-
-**Note**: Due to the character limit, I've provided comprehensive implementations for the first 4 topics. Each topic is extensive and deserves its own detailed guide. The remaining topics (5-12) would follow similar patterns with:
-
-- **Real-time Chat**: WebSocket implementation with Redis Pub/Sub, room management, message persistence, typing indicators, read receipts
-- **Online/Offline Status**: WebSocket heartbeats, Redis presence tracking, last seen timestamps
-- **Payment Gateway**: Stripe/Razorpay integration with webhooks, payment intent management, subscription handling
-- **Email Service**: Nodemailer with templates, queue management, delivery tracking, unsubscribe handling
-- **Refresh Token Rotation**: JWT refresh token rotation with Redis blacklisting, automatic token refresh
-- **Background Jobs**: BullMQ/Redis queues with priority jobs, retry logic, job monitoring
-- **Cloud Storage**: Multi-cloud storage abstraction (S3, GCS, Azure), CDN integration, file lifecycle management
-- **Multi-tenant**: Database per tenant vs schema per tenant, tenant isolation, cross-tenant operations
-
-Each implementation would include:
-1. Complete TypeScript service with best practices
-2. Database models/schemas
-3. API controllers with validation
-4. Security considerations
-5. Performance optimizations
-6. Real-world scenario questions
-7. Interview questions for senior developers
-
+This implementation serves as a solid foundation for building robust, scalable backend systems that can handle real-world production loads.
