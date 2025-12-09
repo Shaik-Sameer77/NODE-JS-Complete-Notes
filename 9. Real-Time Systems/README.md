@@ -1,14 +1,14 @@
 # Real-Time Systems - Comprehensive Guide
 
 ## 📚 Table of Contents
-1. [Socket.io](#1-socket.io)
-2. [WebSockets Bare Implementation](#websockets-bare-implementation)
-3. [Redis Pub/Sub](#redis-pubsub)
-4. [Broadcasting Events](#broadcasting-events)
-5. [Chat Applications](#chat-applications)
-6. [Online/Offline Presence Detection](#onlineoffline-presence-detection)
-7. [Interview Questions](#interview-questions)
-8. [Real-World Scenarios](#real-world-scenarios)
+1. [Socket.io](#1-socketio)
+2. [WebSockets Bare Implementation](#2-websockets-bare-implementation)
+3. [Redis Pub/Sub](#3-redis-pubsub)
+4. [Broadcasting Events](#4-broadcasting-events)
+5. [Chat Applications](#5-chat-applications)
+6. [Online/Offline Presence Detection](#6-onlineoffline-presence-detection)
+7. [Interview Questions](#7-interview-questions)
+8. [Real-World Scenarios](#8-real-world-scenarios)
 
 ---
 
@@ -759,7 +759,7 @@ class MessageBatcher {
 
 ---
 
-## 2. WebSockets Bare Implementation {#websockets-bare-implementation}
+## 2. WebSockets Bare Implementation
 
 ### Overview
 WebSocket is a protocol providing full-duplex communication channels over a single TCP connection. Unlike HTTP, WebSocket connections are persistent, allowing real-time data transfer.
@@ -1731,7 +1731,7 @@ class WebSocketRateLimiter {
 
 ---
 
-## 3. Redis Pub/Sub {#redis-pubsub}
+## 3. Redis Pub/Sub
 
 ### Overview
 Redis Pub/Sub (Publish/Subscribe) is a messaging pattern where senders (publishers) send messages to channels without knowing who will receive them, and receivers (subscribers) express interest in channels to receive messages.
@@ -2922,7 +2922,7 @@ class RedisPubSubMonitor {
 
 ---
 
-## 4. Broadcasting Events {#broadcasting-events}
+## 4. Broadcasting Events
 
 ### Overview
 Broadcasting events is the process of sending messages to multiple clients simultaneously. This is fundamental for real-time applications where multiple users need to receive updates.
@@ -3958,7 +3958,7 @@ class BroadcastAnalytics {
 
 ---
 
-## 5. Chat Applications {#chat-applications}
+## 5. Chat Applications
 
 ### Complete Chat Application Architecture
 
@@ -5229,7 +5229,7 @@ class ChatMicroservice {
 
 ---
 
-## 6. Online/Offline Presence Detection {#onlineoffline-presence-detection}
+## 6. Online/Offline Presence Detection
 
 ### Comprehensive Presence System
 
@@ -6296,7 +6296,7 @@ class PresenceVisualization {
 
 ---
 
-## 7. Interview Questions {#interview-questions}
+## 7. Interview Questions
 
 ### Socket.io Interview Questions
 
@@ -6465,7 +6465,7 @@ class PresenceVisualization {
 
 ---
 
-## 8. Real-World Scenarios {#real-world-scenarios}
+## 8. Real-World Scenarios
 
 ### Scenario 1: Large-Scale Trading Platform
 
